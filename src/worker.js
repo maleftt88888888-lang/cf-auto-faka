@@ -209,6 +209,23 @@ export default {
         }, corsHeaders);
       }
 
+      // 路由 3.2: 站长后台一键驳回/取消虚假订单/删除废单
+      if (path === "/api/admin/cancel_order" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const orderNo = body.order_no;
+        await env.DB.prepare("DELETE FROM orders WHERE order_no = ? AND status = 0").bind(orderNo).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: `🗑️ 订单 ${orderNo} 已驳回/删除！`
+        }, corsHeaders);
+      }
+
       // 路由 3.5: 密码错误自助换号（方案4：严格限制2小时内且最多1次）
       if (path === "/api/order/replace" && request.method === "POST") {
         const body = await request.json();
@@ -2140,9 +2157,14 @@ function getAdminHTML(env) {
                   '</div>' +
                   '<div class="flex justify-between items-center pt-0.5">' +
                     '<span class="text-[11px] text-slate-400 font-mono">' + o.created_at + '</span>' +
-                    '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-xl text-xs shadow-lg flex items-center gap-1.5 transition transform active:scale-95">' +
-                      '<i class="fa-solid fa-bolt"></i> 确认已收款，立即出卡' +
-                    '</button>' +
+                    '<div class="flex items-center gap-2">' +
+                      '<button data-no="' + o.order_no + '" onclick="cancelAdminOrder(this.dataset.no, \'驳回\')" class="px-3 py-2 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 font-bold rounded-xl text-xs border border-slate-700 transition" title="买家未付款或付款异常时驳回订单">' +
+                        '<i class="fa-solid fa-ban"></i> 驳回' +
+                      '</button>' +
+                      '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-xl text-xs shadow-lg flex items-center gap-1.5 transition transform active:scale-95">' +
+                        '<i class="fa-solid fa-bolt"></i> 确认已收款，立即出卡' +
+                      '</button>' +
+                    '</div>' +
                   '</div>' +
                 '</div>';
               }).join("");
@@ -2162,9 +2184,14 @@ function getAdminHTML(env) {
                   '</div>' +
                   '<div class="flex justify-between items-center text-slate-400 text-[11px] pt-1 border-t border-slate-700/40">' +
                     '<span>下单: ' + o.created_at + ' (' + (o.contact || '无联系') + ')</span>' +
-                    '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-2.5 py-1 bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white rounded text-[11px] font-medium transition">' +
-                      '直接出卡' +
-                    '</button>' +
+                    '<div class="flex items-center gap-1.5">' +
+                      '<button data-no="' + o.order_no + '" onclick="cancelAdminOrder(this.dataset.no, \'删除\')" class="px-2 py-1 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 rounded text-[11px] border border-slate-700 transition" title="删除该废单">' +
+                        '<i class="fa-solid fa-trash-can"></i>' +
+                      '</button>' +
+                      '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-2.5 py-1 bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white rounded text-[11px] font-medium transition">' +
+                        '直接出卡' +
+                      '</button>' +
+                    '</div>' +
                   '</div>' +
                 '</div>';
               }).join("");
@@ -2491,6 +2518,25 @@ function getAdminHTML(env) {
         }
       } catch (e) {
         alert("网络错误");
+      }
+    }
+
+    async function cancelAdminOrder(orderNo, actionText) {
+      var key = document.getElementById("admin-key").value.trim();
+      var tip = actionText || "取消/删除";
+      if (!confirm("确定要" + tip + "该订单 (" + orderNo + ") 吗？")) return;
+
+      try {
+        var res = await fetch("/api/admin/cancel_order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, order_no: orderNo })
+        });
+        var json = await res.json();
+        alert(json.msg || "操作成功");
+        loadAdminData();
+      } catch (e) {
+        alert("操作失败");
       }
     }
 
