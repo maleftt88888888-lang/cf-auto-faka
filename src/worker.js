@@ -1601,7 +1601,7 @@ function getAdminHTML(env) {
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-400">
         <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-        <span>4秒自动监听新订单</span>
+        <span id="poll-status-text">4秒自动监听新订单</span>
       </div>
     </div>
 
@@ -1925,16 +1925,24 @@ function getAdminHTML(env) {
     }
 
     async function loadAdminData() {
-      var key = document.getElementById("admin-key").value.trim();
+      var keyInput = document.getElementById("admin-key");
+      var key = (keyInput ? keyInput.value.trim() : "") || "51245124";
+      if (keyInput) keyInput.value = key;
       localStorage.setItem("faka_admin_key", key);
 
       var pBox = document.getElementById("pending-list");
       var rBox = document.getElementById("recent-list");
       var pBadge = document.getElementById("pending-count-badge");
+      var pollTxt = document.getElementById("poll-status-text");
 
       try {
         var res = await fetch("/api/admin/orders?key=" + encodeURIComponent(key));
         var json = await res.json();
+        
+        if (pollTxt) {
+          pollTxt.innerText = "4秒监听中 (" + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + ")";
+        }
+
         if (json.code === 0) {
           if (json.price) {
             document.getElementById("price-input").value = json.price;
@@ -2003,17 +2011,21 @@ function getAdminHTML(env) {
             renderCategoryPriceTable(json.categories, json.category_prices);
           }
 
-          rBox.innerHTML = json.recent.map(function(o) {
+          rBox.innerHTML = (json.recent || []).map(function(o) {
             return '<div class="p-2.5 rounded-lg bg-slate-800/60 text-xs border border-slate-700/60 space-y-1">' +
               '<div class="flex justify-between text-slate-400">' +
                 '<span>' + o.order_no + ' (' + o.region + ')</span>' +
-                '<span class="text-emerald-400 font-mono">' + o.paid_at + '</span>' +
+                '<span class="text-emerald-400 font-mono">' + (o.paid_at || '') + '</span>' +
               '</div>' +
-              '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-1.5 rounded">' + o.carmi + '</div>' +
+              '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-1.5 rounded">' + (o.carmi || '已核销') + '</div>' +
             '</div>';
           }).join("");
+        } else {
+          if (pBox) pBox.innerHTML = '<div class="p-3 bg-rose-950/60 border border-rose-800 rounded-lg text-rose-300 text-xs text-center">⚠️ 访问受限: ' + (json.msg || "密钥错误") + '，请在上方输入正确密钥（默认: 51245124）</div>';
         }
-      } catch (e) {}
+      } catch (e) {
+        if (pollTxt) pollTxt.innerText = "网络异常重试中...";
+      }
     }
 
     var currentCategories = ["美国", "香港", "日本", "台湾", "通用"];
@@ -2027,13 +2039,14 @@ function getAdminHTML(env) {
 
       var html = currentCategories.map(function(cat) {
         var p = currentCategoryPrices[cat] || "";
+        var encodedCat = encodeURIComponent(cat);
         return '<div class="flex items-center gap-2 p-1.5 bg-slate-800/60 rounded-lg border border-slate-700/60">' +
           '<span class="w-20 text-xs font-bold text-slate-200 truncate" title="' + cat + '">' + cat + '</span>' +
           '<div class="relative flex-1">' +
             '<span class="absolute left-2.5 top-1.5 text-slate-400 text-xs">￥</span>' +
-            '<input type="number" step="0.01" data-cat="' + cat + '" value="' + p + '" placeholder="默认基准价" class="cat-price-input w-full pl-6 pr-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
+            '<input type="number" step="0.01" data-cat="' + encodedCat + '" value="' + p + '" placeholder="默认基准价" class="cat-price-input w-full pl-6 pr-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
           '</div>' +
-          '<button onclick="autoGenerateForCategory(\'' + cat + '\')" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded text-[11px] shrink-0 flex items-center gap-1 shadow transition" title="一键生成【' + cat + '】的专属高清宣传海报">' +
+          '<button data-cat="' + encodedCat + '" onclick="autoGenerateForCategory(decodeURIComponent(this.dataset.cat))" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded text-[11px] shrink-0 flex items-center gap-1 shadow transition" title="一键生成【' + cat + '】的专属高清宣传海报">' +
             '<i class="fa-solid fa-wand-magic-sparkles"></i> 出图' +
           '</button>' +
         '</div>';
