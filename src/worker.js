@@ -1767,12 +1767,20 @@ function getAdminHTML(env) {
     </div>
 
     <!-- 🎨 自动化生成商品海报与推广主图 (新增利器) -->
-    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+    <div id="poster-section" class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
       <div class="flex justify-between items-center border-b border-slate-800 pb-2">
         <h2 class="font-bold text-pink-400 flex items-center gap-2 text-sm">
           <i class="fa-solid fa-wand-magic-sparkles"></i> 自动生成商品宣传主图 / 朋友圈海报
         </h2>
         <span class="text-[11px] text-slate-500">一键生成高清发圈海报</span>
+      </div>
+
+      <!-- 快速选择已有商品一键套用 -->
+      <div class="p-2 bg-slate-800/60 rounded-lg border border-slate-700/60 flex items-center gap-2 text-xs">
+        <span class="text-indigo-400 font-bold shrink-0"><i class="fa-solid fa-bolt"></i> 快速套用商品:</span>
+        <select id="poster-category-preset" onchange="applyCategoryPreset(this.value)" class="flex-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-bold">
+          <option value="">-- 点击快速选择任意商品出图 --</option>
+        </select>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2020,15 +2028,87 @@ function getAdminHTML(env) {
       var html = currentCategories.map(function(cat) {
         var p = currentCategoryPrices[cat] || "";
         return '<div class="flex items-center gap-2 p-1.5 bg-slate-800/60 rounded-lg border border-slate-700/60">' +
-          '<span class="w-24 text-xs font-bold text-slate-200 truncate" title="' + cat + '">' + cat + '</span>' +
+          '<span class="w-20 text-xs font-bold text-slate-200 truncate" title="' + cat + '">' + cat + '</span>' +
           '<div class="relative flex-1">' +
             '<span class="absolute left-2.5 top-1.5 text-slate-400 text-xs">￥</span>' +
             '<input type="number" step="0.01" data-cat="' + cat + '" value="' + p + '" placeholder="默认基准价" class="cat-price-input w-full pl-6 pr-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
           '</div>' +
+          '<button onclick="autoGenerateForCategory(\'' + cat + '\')" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded text-[11px] shrink-0 flex items-center gap-1 shadow transition" title="一键生成【' + cat + '】的专属高清宣传海报">' +
+            '<i class="fa-solid fa-wand-magic-sparkles"></i> 出图' +
+          '</button>' +
         '</div>';
       }).join("");
 
       container.innerHTML = html;
+
+      // 同步更新海报生成器的快捷下拉框
+      var presetSelect = document.getElementById("poster-category-preset");
+      if (presetSelect) {
+        var opts = '<option value="">-- 点击快速选择任意商品出图 --</option>' +
+          currentCategories.map(function(c) {
+            var priceDisp = currentCategoryPrices[c] ? ' (￥' + currentCategoryPrices[c] + ')' : '';
+            return '<option value="' + c + '">' + c + priceDisp + '</option>';
+          }).join("");
+        presetSelect.innerHTML = opts;
+      }
+    }
+
+    function autoGenerateForCategory(cat) {
+      applyCategoryPreset(cat);
+      var posterSec = document.getElementById("poster-section");
+      if (posterSec) {
+        posterSec.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+
+    function applyCategoryPreset(cat) {
+      if (!cat) return;
+      var defaultPrice = document.getElementById("price-input").value.trim() || "4.99";
+      var catPrice = currentCategoryPrices[cat] || defaultPrice;
+
+      // 智能生成标题
+      var title = cat;
+      var tag = "官方正品 · 独享首发";
+      var feats = "⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐全区畅享";
+      var theme = "purple";
+
+      if (cat.indexOf("美国") !== -1 || cat.indexOf("香港") !== -1 || cat.indexOf("日本") !== -1 || cat.indexOf("台湾") !== -1) {
+        title = cat + " Apple ID 独享账号";
+        tag = "官方正品 · AppStore专用";
+        feats = "⚡自动秒发 🔒支持改密 🛡️2小时售后 🍏已购小火箭";
+        theme = "purple";
+      } else if (cat.toLowerCase().indexOf("chatgpt") !== -1 || cat.toLowerCase().indexOf("gpt") !== -1 || cat.toLowerCase().indexOf("ai") !== -1) {
+        title = cat + " 独享原生账号";
+        tag = "智能AI · 独享首发";
+        feats = "⚡自动发货 🤖支持GPT-4o 🔒原生独享 🛡️质保稳定";
+        theme = "techblue";
+      } else if (cat.toLowerCase().indexOf("netflix") !== -1 || cat.toLowerCase().indexOf("奈飞") !== -1 || cat.toLowerCase().indexOf("spotify") !== -1) {
+        title = cat + " 4K 高级独享会员";
+        tag = "影音娱乐 · 极速出卡";
+        feats = "⚡自动发货 🎬4K超高清 🔒独立车位 🛡️质保包换";
+        theme = "darkgold";
+      } else if (cat === "通用") {
+        title = "小火箭 Shadowrocket 独享账号";
+        tag = "官方正品 · 独享首发";
+        feats = "⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐极速下载";
+        theme = "purple";
+      } else {
+        title = cat + " 独享专卖";
+        tag = "精品热销 · 自动出卡";
+        feats = "⚡自动秒发 🔒安全独享 🛡️正品保障 🚀极速交付";
+        theme = "emerald";
+      }
+
+      document.getElementById("poster-title").value = title;
+      document.getElementById("poster-price").value = "￥" + parseFloat(catPrice).toFixed(2);
+      document.getElementById("poster-tag").value = tag;
+      document.getElementById("poster-features").value = feats;
+      document.getElementById("poster-theme").value = theme;
+
+      var presetSelect = document.getElementById("poster-category-preset");
+      if (presetSelect) presetSelect.value = cat;
+
+      generateProductPoster();
     }
 
     function addCustomCategoryPriceRow() {
