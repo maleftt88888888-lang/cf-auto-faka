@@ -811,28 +811,45 @@ function getAdminHTML(env) {
       if (!fileInput.files || fileInput.files.length === 0) return alert("请先选择一张图片");
 
       const file = fileInput.files[0];
-      const reader = new FileReader();
       const btn = document.getElementById("btn-upload-qr");
       btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 上传中...';
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 压缩并上传中...';
 
-      reader.onload = async function(e) {
-        const base64Data = e.target.result;
-        try {
-          const res = await fetch("/api/admin/upload_qrcode", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ key, image_data: base64Data })
-          });
-          const json = await res.json();
-          alert(json.msg || "上传完成");
-          loadAdminData();
-        } catch (err) {
-          alert("上传失败");
-        } finally {
-          btn.disabled = false;
-          btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> 一键上传到 Cloudflare';
-        }
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const img = new Image();
+        img.onload = async function() {
+          // 自动压缩为适合展示的高清尺寸 (最大宽/高 600px)，体积仅几十KB
+          const canvas = document.createElement("canvas");
+          const maxDim = 600;
+          let w = img.width, h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+            else { w = Math.round(w * maxDim / h); h = maxDim; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          const compressedBase64 = canvas.toDataURL("image/jpeg", 0.88);
+
+          try {
+            const res = await fetch("/api/admin/upload_qrcode", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key, image_data: compressedBase64 })
+            });
+            const json = await res.json();
+            alert(json.msg || "上传成功");
+            loadAdminData();
+          } catch (err) {
+            alert("上传失败，请重试");
+          } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> 一键上传到 Cloudflare';
+          }
+        };
+        img.src = e.target.result;
       };
       reader.readAsDataURL(file);
     }
