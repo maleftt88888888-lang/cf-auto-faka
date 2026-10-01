@@ -1,6 +1,5 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统 (0成本个人收款码核销版)
- * 支持：自动抓取目标站账号、多地区库存、微信赞赏码/个人收款码支付、手机端管理后台一键核销发卡
+ * Cloudflare Worker - 智能自动抓取发卡系统 (支持收款码直接上传至 Cloudflare D1 存储)
  */
 
 export default {
@@ -26,7 +25,7 @@ export default {
     }
 
     try {
-      // 路由 1: 获取各地区库存统计及网站配置
+      // 路由 1: 获取各地区库存统计及网站配置（优先读取 D1 中保存的收款码）
       if (path === "/api/stats") {
         const rows = await env.DB.prepare(`
           SELECT region, COUNT(CASE WHEN status = 0 THEN 1 END) as stock, COUNT(CASE WHEN status = 1 THEN 1 END) as sold
@@ -50,12 +49,21 @@ export default {
           }
         }
 
+        // 读取保存在 D1 中的收款码图片
+        let qrcode = env.PAY_QRCODE_URL || "";
+        try {
+          const settingRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
+          if (settingRow && settingRow.value) {
+            qrcode = settingRow.value;
+          }
+        } catch (e) {}
+
         return jsonResponse({
           code: 0,
           data: Object.values(regionMap),
           site_name: env.SITE_NAME || "云账号智能发卡平台",
           price: env.PRICE_PER_ACCOUNT || "1.00",
-          pay_qrcode: env.PAY_QRCODE_URL || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300" // 收款码图片
+          pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
       }
 
@@ -74,12 +82,10 @@ export default {
           return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后再试或联系站长补货！` }, corsHeaders);
         }
 
-        // 生成唯一订单号及简短 4 位核销码（方便买家在微信付款时备注）
         const checkCode = Math.floor(1000 + Math.random() * 9000).toString();
         const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
         const price = parseFloat(env.PRICE_PER_ACCOUNT || "1.00");
 
-        // 插入待付款/待核销订单 (status = 0)
         await env.DB.prepare(`
           INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at)
           VALUES (?, ?, ?, ?, 0, ?, datetime('now'))
@@ -97,7 +103,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 3: 轮询检查订单状态（买家付款后页面自动查询出卡）
+      // 路由 3: 轮询检查订单状态
       if (path === "/api/order/check") {
         const orderNo = url.searchParams.get("order_no");
         if (!orderNo) return jsonResponse({ code: -1, msg: "缺少订单号" }, corsHeaders);
@@ -107,13 +113,13 @@ export default {
 
         return jsonResponse({
           code: 0,
-          status: order.status, // 0=待核销, 1=已发卡
+          status: order.status,
           carmi: order.carmi || "",
           region: order.region
         }, corsHeaders);
       }
 
-      // 路由 4: 管理员后台 - 获取待核销订单列表与所有数据
+      // 路由 4: 管理员后台 - 获取待核销订单列表与数据
       if (path === "/api/admin/orders") {
         const key = url.searchParams.get("key") || "";
         if (key !== (env.ADMIN_KEY || "admin123456")) {
@@ -134,14 +140,46 @@ export default {
           ORDER BY id DESC LIMIT 15
         `).all();
 
+        let currentQrcode = "";
+        try {
+          const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
+          if (qrSetting) currentQrcode = qrSetting.value;
+        } catch (e) {}
+
         return jsonResponse({
           code: 0,
           pending: pendingOrders.results || [],
-          recent: recentPaid.results || []
+          recent: recentPaid.results || [],
+          qrcode: currentQrcode
         }, corsHeaders);
       }
 
-      // 路由 5: 管理员后台 - 一键核销并发卡
+      // 路由 5: 管理员后台 - 一键上传收款码保存至 Cloudflare D1
+      if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "admin123456")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const imageData = body.image_data; // Base64 格式的图片数据
+        if (!imageData || !imageData.startsWith("data:image/")) {
+          return jsonResponse({ code: -1, msg: "无效的图片格式" }, corsHeaders);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('PAY_QRCODE', ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+        `).bind(imageData).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "🎉 收款码已成功上传并保存在 Cloudflare 中！"
+        }, corsHeaders);
+      }
+
+      // 路由 6: 管理员后台 - 一键核销并发卡
       if (path === "/api/admin/approve" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -155,19 +193,15 @@ export default {
           return jsonResponse({ code: -1, msg: "订单不存在或已被核销" }, corsHeaders);
         }
 
-        // 从对应地区库存取出一张卡密
         const carmiRecord = await env.DB.prepare(
           "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
         ).bind(order.region).first();
 
         if (!carmiRecord) {
-          return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密，请先抓取同步！` }, corsHeaders);
+          return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密！` }, corsHeaders);
         }
 
-        // 标记卡密已售
         await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
-
-        // 标记订单已完成
         await env.DB.prepare("UPDATE orders SET status = 1, carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(carmiRecord.carmi, orderNo).run();
 
         return jsonResponse({
@@ -177,21 +211,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 6: 管理员一键手动抓取同步
-      if (path === "/api/admin/sync") {
-        const key = url.searchParams.get("key") || "";
-        if (key !== (env.ADMIN_KEY || "admin123456")) {
-          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
-        }
-        const result = await syncAccountsFromSource(env);
-        return jsonResponse({
-          code: 0,
-          msg: result.error ? `同步失败: ${result.error}` : `同步完成！本次新增入库 ${result.inserted} 条卡密，总解析到 ${result.total} 条账号。`,
-          data: result
-        }, corsHeaders);
-      }
-
-      // 路由 6.1: 管理员手动批量导入卡密
+      // 路由 7: 管理员手动批量导入卡密
       if (path === "/api/admin/import" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -220,19 +240,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 6.2: 调试抓取页面源码
-      if (path === "/api/admin/debug_fetch") {
-        const targetUrl = env.TARGET_URL || "https://haogd.top/share/app";
-        const res = await fetch(targetUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          }
-        });
-        const text = await res.text();
-        return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
-      }
-
-      // 路由 7: 历史订单查询
+      // 路由 8: 历史订单查询
       if (path === "/api/order/query") {
         const queryVal = (url.searchParams.get("keyword") || "").trim();
         if (!queryVal) return jsonResponse({ code: -1, msg: "请输入订单号或联系方式" }, corsHeaders);
@@ -247,14 +255,14 @@ export default {
         return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
       }
 
-      // 路由 8: 管理员控制台页面 (/admin)
+      // 路由 9: 管理员后台页面 (/admin)
       if (path === "/admin") {
         return new Response(getAdminHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
 
-      // 路由 9: 买家前台首页
+      // 路由 10: 买家前台首页
       if (path === "/" || path === "/index.html") {
         return new Response(getFrontendHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -270,70 +278,6 @@ export default {
   }
 };
 
-/**
- * 抓取与解析逻辑
- */
-async function syncAccountsFromSource(env) {
-  const targetUrl = env.TARGET_URL || "https://haogd.top/share/app";
-  let inserted = 0;
-  let total = 0;
-
-  try {
-    const res = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      }
-    });
-
-    if (!res.ok) {
-      return { total: 0, inserted: 0, error: `目标源站响应异常 HTTP ${res.status}: ${res.statusText}` };
-    }
-
-    const html = await res.text();
-    const accountPattern = /(?:账号地区[：:]\s*([^\s\r\n<]+))?[\s\S]*?(?:账号[：:]\s*([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+))[\s\S]*?(?:密码[：:]\s*([^\s\r\n<]+))/gi;
-    const fallbackPattern = /([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\s+([a-zA-Z0-9!@#$%^&*()_+=\-`~]{6,30})/gi;
-
-    let match;
-    const accounts = [];
-
-    while ((match = accountPattern.exec(html)) !== null) {
-      const region = (match[1] || "通用").replace(/[^\u4e00-\u9fa5a-zA-Z]/g, "").trim() || "通用";
-      const account = match[2].trim();
-      const password = match[3].trim();
-      if (account && password) accounts.push({ region, account, password });
-    }
-
-    if (accounts.length === 0) {
-      while ((match = fallbackPattern.exec(html)) !== null) {
-        const account = match[1].trim();
-        const password = match[2].trim();
-        accounts.push({ region: "美国", account, password });
-      }
-    }
-
-    total = accounts.length;
-
-    for (const item of accounts) {
-      const carmi = `【${item.region}】账号: ${item.account} ---- 密码: ${item.password}`;
-      try {
-        const res = await env.DB.prepare(`
-          INSERT INTO carmis (region, account, password, carmi, status, created_at)
-          VALUES (?, ?, ?, ?, 0, datetime('now'))
-        `).bind(item.region, item.account, item.password, carmi).run();
-
-        if (res.meta && res.meta.changes > 0) inserted++;
-      } catch (dbErr) {}
-    }
-    console.log(`✅ 抓取同步成功: 共解析 ${total} 条，成功新增入库 ${inserted} 条`);
-  } catch (err) {
-    console.error("❌ 抓取同步出错:", err);
-    return { total: 0, inserted: 0, error: err.message };
-  }
-
-  return { total, inserted };
-}
-
 function jsonResponse(data, headers = {}, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -346,7 +290,6 @@ function jsonResponse(data, headers = {}, status = 200) {
  */
 function getFrontendHTML(env) {
   const siteName = env.SITE_NAME || "云账号智能发卡平台";
-  const payQrcode = env.PAY_QRCODE_URL || "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=请在CF后台设置PAY_QRCODE_URL填入您的微信赞赏码";
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -363,16 +306,14 @@ function getFrontendHTML(env) {
 </head>
 <body class="py-8 px-4 flex flex-col items-center">
   <div class="max-w-3xl w-full">
-    <!-- Header -->
     <div class="text-center mb-8">
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-4 border border-indigo-500/30">
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
       <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
-      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时抓取同步 · 微信扫码即出号</p>
+      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时库存同步 · 微信扫码即出号</p>
     </div>
 
-    <!-- 主卡片 -->
     <div class="glass rounded-2xl p-6 sm:p-8 shadow-2xl mb-6">
       <div class="flex border-b border-slate-700 mb-6">
         <button id="tab-buy" onclick="switchTab('buy')" class="py-2.5 px-6 font-medium text-indigo-400 border-b-2 border-indigo-500 flex items-center gap-2">
@@ -430,8 +371,8 @@ function getFrontendHTML(env) {
           <i class="fa-brands fa-weixin text-emerald-400 text-xl"></i> 微信扫码付款
         </h3>
         
-        <div class="p-2 bg-white rounded-xl inline-block shadow-inner mx-auto">
-          <img id="pay-qr-img" src="${payQrcode}" alt="微信收款码" class="w-48 h-48 rounded-lg object-contain mx-auto">
+        <div class="p-2 bg-white rounded-xl inline-block shadow-inner mx-auto max-w-[220px] max-h-[220px]">
+          <img id="pay-qr-img" src="" alt="微信收款码" class="w-48 h-48 rounded-lg object-contain mx-auto">
         </div>
 
         <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-left space-y-1">
@@ -554,8 +495,6 @@ function getFrontendHTML(env) {
           document.getElementById("pay-money").innerText = "￥" + data.data.price;
           document.getElementById("pay-check-code").innerText = data.data.check_code;
           document.getElementById("modal-pay").classList.remove("hidden");
-
-          // 开始轮询检查订单是否核销
           startPolling();
         } else {
           alert(data.msg || "创建订单失败");
@@ -576,7 +515,6 @@ function getFrontendHTML(env) {
           const res = await fetch("/api/order/check?order_no=" + currentOrderNo);
           const json = await res.json();
           if (json.code === 0 && json.status === 1) {
-            // 已出卡！
             clearInterval(pollTimer);
             document.getElementById("modal-pay").classList.add("hidden");
             document.getElementById("res-order-no").innerText = currentOrderNo;
@@ -670,7 +608,7 @@ function getAdminHTML(env) {
 <body class="p-4 max-w-2xl mx-auto">
   <div class="mb-6 flex justify-between items-center border-b border-slate-800 pb-4">
     <h1 class="text-xl font-bold flex items-center gap-2 text-indigo-400">
-      <i class="fa-solid fa-shield-halved"></i> 站长核销与库存管理
+      <i class="fa-solid fa-shield-halved"></i> 站长核销与设置面板
     </h1>
     <a href="/" class="text-xs text-slate-400 hover:text-white">返回首页</a>
   </div>
@@ -680,9 +618,25 @@ function getAdminHTML(env) {
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 flex gap-2">
       <input type="password" id="admin-key" placeholder="输入管理员密钥 (默认: admin123456)" value="admin123456" class="flex-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white">
       <button onclick="loadAdminData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">刷新</button>
-      <button onclick="syncNow()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium flex items-center gap-1">
-        <i class="fa-solid fa-rotate"></i> 抓取同步
-      </button>
+    </div>
+
+    <!-- 上传微信收款码图片至 Cloudflare 存储 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-bold text-emerald-400 flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-image"></i> 设置微信收款码 (直接保存至 Cloudflare)
+      </h2>
+      <div class="flex flex-col sm:flex-row gap-4 items-center">
+        <div class="w-24 h-24 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden">
+          <img id="current-qrcode-preview" src="" alt="收款码" class="w-full h-full object-contain hidden">
+          <span id="no-qrcode-text" class="text-xs text-slate-500">未设置</span>
+        </div>
+        <div class="flex-1 space-y-2 w-full">
+          <input type="file" id="qrcode-file-input" accept="image/*" class="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 cursor-pointer">
+          <button onclick="uploadQrcode()" id="btn-upload-qr" class="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1">
+            <i class="fa-solid fa-cloud-arrow-up"></i> 一键上传到 Cloudflare
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 待核销订单列表 -->
@@ -735,6 +689,12 @@ function getAdminHTML(env) {
         const res = await fetch("/api/admin/orders?key=" + encodeURIComponent(key));
         const json = await res.json();
         if (json.code === 0) {
+          if (json.qrcode) {
+            document.getElementById("current-qrcode-preview").src = json.qrcode;
+            document.getElementById("current-qrcode-preview").classList.remove("hidden");
+            document.getElementById("no-qrcode-text").classList.add("hidden");
+          }
+
           if (json.pending.length === 0) {
             pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-2">暂无待核销订单</div>';
           } else {
@@ -769,6 +729,38 @@ function getAdminHTML(env) {
       }
     }
 
+    async function uploadQrcode() {
+      const fileInput = document.getElementById("qrcode-file-input");
+      const key = document.getElementById("admin-key").value.trim();
+      if (!fileInput.files || fileInput.files.length === 0) return alert("请先选择一张图片");
+
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      const btn = document.getElementById("btn-upload-qr");
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 上传中...';
+
+      reader.onload = async function(e) {
+        const base64Data = e.target.result;
+        try {
+          const res = await fetch("/api/admin/upload_qrcode", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key, image_data: base64Data })
+          });
+          const json = await res.json();
+          alert(json.msg || "上传完成");
+          loadAdminData();
+        } catch (err) {
+          alert("上传失败");
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> 一键上传到 Cloudflare';
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+
     async function approveOrder(orderNo) {
       const key = document.getElementById("admin-key").value.trim();
       if (!confirm("确认已收到该笔微信款项并为买家出卡？")) return;
@@ -788,17 +780,6 @@ function getAdminHTML(env) {
         }
       } catch (e) {
         alert("网络错误");
-      }
-    }
-
-    async function syncNow() {
-      const key = document.getElementById("admin-key").value.trim();
-      try {
-        const res = await fetch("/api/admin/sync?key=" + encodeURIComponent(key));
-        const json = await res.json();
-        alert(json.msg);
-      } catch (e) {
-        alert("同步请求失败");
       }
     }
 

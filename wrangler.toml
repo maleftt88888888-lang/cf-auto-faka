@@ -2,7 +2,7 @@ name = "cf-auto-faka"
 main = "src/worker.js"
 compatibility_date = "2024-01-01"
 
-# 定时触发器：每小时自动从目标网站抓取最新可用账号同步到库存
+# 定时触发器：每小时自动同步
 [triggers]
 crons = ["0 * * * *"]
 
@@ -12,10 +12,9 @@ binding = "DB"
 database_name = "faka-db"
 database_id = "3ad9ee3f-166f-4446-9a00-b39c8fcb2ecf"
 
-# 环境变量配置
+# 环境变量配置 (已自动同步你的自定义设置)
 [vars]
-SITE_NAME = "云账号智能发卡平台"
-ADMIN_KEY = "admin123456" # 管理员后台秘钥
+SITE_NAME = "小火箭账号"
+ADMIN_KEY = "51245124"
+PRICE_PER_ACCOUNT = "4.99"
 TARGET_URL = "https://haogd.top/share/app"
-PRICE_PER_ACCOUNT = "1.00" # 账号单价（元）
-PAY_QRCODE_URL = "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
