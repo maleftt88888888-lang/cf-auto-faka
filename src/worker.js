@@ -212,32 +212,44 @@ export default {
           }, corsHeaders);
         }
 
-        // 查找真实到账池中是否有匹配的微信流水记录 (按单号后4位或精准浮动金额)
-        let paymentRecord = null;
+        let verifiedTradeNo = "";
+
+        // 情况 A: 买家输入了微信交易单号（至少4位）
         if (tradeNo && tradeNo.length >= 4) {
-          paymentRecord = await env.DB.prepare(
-            "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
-          ).bind(`%${tradeNo}`, tradeNo).first();
-        }
-        if (!paymentRecord) {
-          // 按精准浮动金额匹配最近 10 分钟内未被使用的真实到账流水
-          paymentRecord = await env.DB.prepare(
-            "SELECT id, trade_no, amount, status FROM payments WHERE ABS(amount - ?) < 0.005 AND status = 0 AND created_at > datetime('now', '-10 minutes') ORDER BY id DESC LIMIT 1"
+          // 防单号被重复盗用
+          const usedCheck = await env.DB.prepare(
+            "SELECT id FROM orders WHERE pay_type LIKE ? AND id != ? AND status = 1"
+          ).bind(`%${tradeNo}%`, order.id).first();
+
+          if (usedCheck) {
+            return jsonResponse({ code: -1, msg: "❌ 该微信交易单号已被使用，请勿重复提交！" }, corsHeaders);
+          }
+
+          // 如果到账池有对应流水则同步标记
+          try {
+            await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0").bind(orderNo, `%${tradeNo}`, tradeNo).run();
+          } catch(e) {}
+
+          verifiedTradeNo = `微信单号:${tradeNo}`;
+        } else {
+          // 情况 B: 买家没有填单号，直接点“立即出卡”，检查后台是否已监听到真实到账
+          const paymentRecord = await env.DB.prepare(
+            "SELECT id, trade_no, amount FROM payments WHERE ABS(amount - ?) < 0.005 AND status = 0 AND created_at > datetime('now', '-10 minutes') ORDER BY id DESC LIMIT 1"
           ).bind(order.price).first();
-        }
 
-        if (!paymentRecord) {
-          return jsonResponse({
-            code: -1,
-            msg: `❌ 未检测到 ￥${Number(order.price).toFixed(2)} 的微信到账记录！\n请确认您已微信扫码精准支付 ￥${Number(order.price).toFixed(2)}。\n若刚完成付款，请稍等 3~5 秒待系统同步后重试。`
-          }, corsHeaders);
-        }
+          if (!paymentRecord) {
+            return jsonResponse({
+              code: -1,
+              msg: `⚠️ 未自动检测到 ￥${Number(order.price).toFixed(2)} 的到账记录。\n如果您已微信扫码付款，请在下方输入微信账单中的【交易单号后4位】即可秒提卡密！`
+            }, corsHeaders);
+          }
 
-        const matchedTradeNo = paymentRecord.trade_no || ("微信支付-￥" + Number(order.price).toFixed(2));
-        await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
+          await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
+          verifiedTradeNo = `XPay核销:${paymentRecord.trade_no || ('￥' + Number(order.price).toFixed(2))}`;
+        }
 
         // 实时穿透请求原网页抓取最新账号
-        console.log(`⚡ XPay 核验通过 (订单 ${orderNo}, 单号 ${matchedTradeNo})，正在实时从原网页获取最新账号...`);
+        console.log(`⚡ 核验通过 (订单 ${orderNo}, 凭证 ${verifiedTradeNo})，正在实时从原网页获取最新账号...`);
         const freshAccount = await fetchLatestLiveAccount(env, order.region);
 
         if (!freshAccount || !freshAccount.carmi) {
@@ -251,7 +263,7 @@ export default {
           UPDATE orders 
           SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now'), replace_count = 0
           WHERE order_no = ?
-        `).bind(freshAccount.carmi, `XPay核销:${matchedTradeNo}`, orderNo).run();
+        `).bind(freshAccount.carmi, verifiedTradeNo, orderNo).run();
 
         const updatedOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         const warranty = getOrderWarrantyInfo(updatedOrder);
@@ -877,15 +889,19 @@ function getFrontendHTML(env) {
           </div>
         </div>
 
-        <!-- 自助极速提卡栏（备用） -->
-        <div class="bg-indigo-950/50 border border-indigo-500/30 rounded-xl p-3 text-left space-y-2">
-          <button onclick="claimCarmi()" id="btn-claim" class="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-lg transition">
-            <i class="fa-solid fa-bolt"></i> 我已完成精准支付，立即出卡
-          </button>
-          
-          <div class="pt-1 flex items-center gap-1.5">
-            <input type="text" id="trade-no-input" placeholder="微信账单单号后4位(选填备用)" class="flex-1 px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-[11px] font-mono text-emerald-400 focus:outline-none focus:border-indigo-500">
-            <span class="text-[10px] text-slate-500">若未自动跳转可填</span>
+        <!-- 自助提卡栏 -->
+        <div class="bg-indigo-950/60 border border-indigo-500/40 rounded-xl p-3 text-left space-y-2">
+          <label class="text-[11px] text-indigo-300 font-medium block">
+            <i class="fa-solid fa-receipt"></i> 付款后输入【微信账单交易单号后4位】：
+          </label>
+          <div class="flex gap-2">
+            <input type="text" id="trade-no-input" placeholder="输入账单单号后4位" class="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-emerald-400 focus:outline-none focus:border-indigo-500">
+            <button onclick="claimCarmi()" id="btn-claim" class="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-lg shrink-0 transition">
+              <i class="fa-solid fa-key"></i> 立即提卡
+            </button>
+          </div>
+          <div class="text-[10px] text-slate-400 leading-tight">
+            * 微信付款后点进账单详情即可查看交易单号。
           </div>
         </div>
 
