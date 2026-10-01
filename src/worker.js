@@ -1542,7 +1542,17 @@ function getAdminHTML(env) {
     }
 
     loadAdminData();
-    setInterval(loadAdminData, 4000);
+    var adminPollTimer = setInterval(loadAdminData, 5000);
+
+    // 智能节流：离开页面/锁屏时自动停止请求，切回页面时立即刷新并恢复
+    document.addEventListener("visibilitychange", function() {
+      if (document.hidden) {
+        if (adminPollTimer) clearInterval(adminPollTimer);
+      } else {
+        loadAdminData();
+        adminPollTimer = setInterval(loadAdminData, 5000);
+      }
+    });
   </script>
 </body>
 </html>`;
