@@ -16,7 +16,7 @@ import urllib.error
 from datetime import datetime
 
 # 发卡系统服务端配置
-SERVER_NOTIFY_URL = "https://cf-auto-faka.maleftt88888888.workers.dev/api/pay/notify"
+SERVER_NOTIFY_URL = "https://faka.medpic.eu.cc/api/pay/notify"
 COMMUNICATION_KEY = "51245124"  # 与后台 ADMIN_KEY 一致
 
 # 记录已推送过的单号，防止重复推送
