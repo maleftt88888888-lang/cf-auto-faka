@@ -57,6 +57,7 @@ export default {
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
         let categoryPrices = {};
+        let categoryImages = {};
 
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
@@ -72,6 +73,11 @@ export default {
           if (catPriceRow && catPriceRow.value) {
             try { categoryPrices = JSON.parse(catPriceRow.value); } catch(e) {}
           }
+
+          const catImgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
+          if (catImgRow && catImgRow.value) {
+            try { categoryImages = JSON.parse(catImgRow.value); } catch(e) {}
+          }
         } catch (e) {}
 
         return jsonResponse({
@@ -80,6 +86,7 @@ export default {
           site_name: currentSiteName,
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
+          category_images: categoryImages,
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
       }
@@ -321,6 +328,12 @@ export default {
           if (catPriceRow && catPriceRow.value) {
             try { categoryPrices = JSON.parse(catPriceRow.value); } catch(e) {}
           }
+
+          let categoryImages = {};
+          const catImgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
+          if (catImgRow && catImgRow.value) {
+            try { categoryImages = JSON.parse(catImgRow.value); } catch(e) {}
+          }
         } catch (e) {}
 
         let allCategories = ["美国", "香港", "日本", "台湾", "通用"];
@@ -328,7 +341,7 @@ export default {
           const catRows = await env.DB.prepare("SELECT DISTINCT region FROM carmis WHERE region IS NOT NULL").all();
           if (catRows && catRows.results) {
             const extraCats = catRows.results.map(r => r.region).filter(Boolean);
-            allCategories = Array.from(new Set([...allCategories, ...extraCats, ...Object.keys(categoryPrices)]));
+            allCategories = Array.from(new Set([...allCategories, ...extraCats, ...Object.keys(categoryPrices), ...Object.keys(categoryImages)]));
           }
         } catch(e) {}
 
@@ -341,6 +354,7 @@ export default {
           site_name: currentSiteName,
           pushplus_token: pushplusToken,
           category_prices: categoryPrices,
+          category_images: categoryImages,
           categories: allCategories
         }, corsHeaders);
       }
@@ -388,6 +402,46 @@ export default {
         return jsonResponse({
           code: 0,
           msg: "🎉 品类定价已保存生效！"
+        }, corsHeaders);
+      }
+
+      // 路由 6.3: 管理员后台 - 设置各品类商品图片/封面
+      if (path === "/api/admin/set_category_image" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const region = (body.region || "").trim();
+        const imageUrl = (body.image_url || body.image_data || "").trim();
+
+        if (!region) {
+          return jsonResponse({ code: -1, msg: "品类名称不能为空" }, corsHeaders);
+        }
+
+        let categoryImages = {};
+        try {
+          const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
+          if (row && row.value) categoryImages = JSON.parse(row.value);
+        } catch(e) {}
+
+        if (imageUrl) {
+          categoryImages[region] = imageUrl;
+        } else {
+          delete categoryImages[region];
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('CATEGORY_IMAGES', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(categoryImages)).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: imageUrl ? `🎉 已成功设置【${region}】商品封面！前台已实时生效。` : `🗑️ 已清除【${region}】的自定义封面图片`,
+          category_images: categoryImages
         }, corsHeaders);
       }
 
@@ -1185,6 +1239,7 @@ function getFrontendHTML(env) {
 
     var globalDefaultPrice = "4.99";
     var globalCategoryPrices = {};
+    var globalCategoryImages = {};
 
     function updateDisplayPriceForRegion(region) {
       var price = globalCategoryPrices[region] || globalDefaultPrice;
@@ -1200,6 +1255,7 @@ function getFrontendHTML(env) {
           loadedRegions = json.data;
           globalDefaultPrice = json.price || "4.99";
           globalCategoryPrices = json.category_prices || {};
+          globalCategoryImages = json.category_images || {};
           if (json.pay_qrcode) document.getElementById("pay-qr-img").src = json.pay_qrcode;
           if (json.site_name) {
             document.title = json.site_name + " - 自动发卡网";
@@ -1334,24 +1390,32 @@ function getFrontendHTML(env) {
         }
 
         var priceForThis = globalCategoryPrices[r.region] || globalDefaultPrice;
+        var imgUrl = globalCategoryImages[r.region];
+        var imgHtml = imgUrl ? 
+          '<img src="' + imgUrl + '" alt="' + r.region + '" class="w-11 h-11 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow-sm">' :
+          '<div class="w-11 h-11 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-base shrink-0 border border-indigo-500/20"><i class="fa-solid fa-layer-group"></i></div>';
+
         var card = document.createElement("div");
-        card.className = "p-4 rounded-xl border cursor-pointer transition duration-150 flex flex-col justify-between " + 
-                         (isSelected ? "card-active border-indigo-500" : "border-slate-700/80 bg-slate-800/40 hover:border-slate-600");
+        card.className = "p-3 rounded-xl border cursor-pointer transition duration-150 flex items-center gap-3 " + 
+                         (isSelected ? "card-active border-indigo-500 shadow-lg" : "border-slate-700/80 bg-slate-800/40 hover:border-slate-600");
         card.onclick = function() {
           currentSelectedRegion = r.region;
           updateDisplayPriceForRegion(r.region);
           renderRegions();
         };
 
-        card.innerHTML = '<div class="flex items-center justify-between mb-2">' +
-            '<span class="font-medium text-white">' + r.region + '</span>' +
-            '<span class="text-xs px-2 py-0.5 rounded-full ' + (r.stock > 0 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400') + '">' +
-              '余量: ' + r.stock +
-            '</span>' +
-          '</div>' +
-          '<div class="flex items-center justify-between text-xs text-slate-400">' +
-            '<span>已售: ' + r.sold + '</span>' +
-            '<span class="text-emerald-400 font-bold font-mono">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+        card.innerHTML = imgHtml + 
+          '<div class="flex-1 min-w-0">' +
+            '<div class="flex items-center justify-between mb-1">' +
+              '<span class="font-bold text-xs sm:text-sm text-white truncate">' + r.region + '</span>' +
+              '<span class="text-[10px] px-1.5 py-0.2 rounded-full font-medium ' + (r.stock > 0 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400') + '">' +
+                '余: ' + r.stock +
+              '</span>' +
+            '</div>' +
+            '<div class="flex items-center justify-between text-xs text-slate-400">' +
+              '<span>已售 ' + r.sold + '</span>' +
+              '<span class="text-emerald-400 font-bold font-mono">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+            '</div>' +
           '</div>';
         container.appendChild(card);
       });
@@ -1665,21 +1729,22 @@ function getAdminHTML(env) {
         </div>
       </div>
 
-      <!-- 1.5. 各品类独立差异化定价管理 -->
-      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+      <!-- 1.5. 各品类专属封面图片与独立定价管理 -->
+      <div class="space-y-3 pt-2 border-t border-slate-800/80">
         <div class="flex items-center justify-between text-xs">
           <label class="font-medium text-slate-300 flex items-center gap-1">
-            <i class="fa-solid fa-layer-group text-indigo-400"></i> 各品类专属定价 (留空则继承基准价)
+            <i class="fa-solid fa-images text-emerald-400"></i> 各品类商品封面图与独立定价
           </label>
           <button type="button" onclick="addCustomCategoryPriceRow()" class="text-[11px] text-indigo-400 hover:text-indigo-300 font-medium">
-            <i class="fa-solid fa-plus"></i> 新增品类定价
+            <i class="fa-solid fa-plus"></i> 新增品类
           </button>
         </div>
-        <div id="category-price-table" class="space-y-1.5">
+        <p class="text-[10px] text-slate-500">上传图片或填入图片链接后，买家前台商品卡片将实时展示精美封面！</p>
+        <div id="category-price-table" class="space-y-2.5">
           <div class="text-slate-500 text-xs py-1 text-center">正在加载品类列表...</div>
         </div>
         <div class="pt-1 flex justify-end">
-          <button onclick="saveCategoryPrices()" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1">
+          <button onclick="saveCategoryPrices()" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow">
             <i class="fa-solid fa-floppy-disk"></i> 保存所有品类定价
           </button>
         </div>
@@ -1763,68 +1828,6 @@ function getAdminHTML(env) {
           </button>
         </div>
         <textarea id="import-text" rows="2" placeholder="一行一条卡密，例如：&#10;账号: xxx@outlook.com ---- 密码: xxx" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-white"></textarea>
-      </div>
-    </div>
-
-    <!-- 🎨 自动化生成商品海报与推广主图 (新增利器) -->
-    <div id="poster-section" class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
-      <div class="flex justify-between items-center border-b border-slate-800 pb-2">
-        <h2 class="font-bold text-pink-400 flex items-center gap-2 text-sm">
-          <i class="fa-solid fa-wand-magic-sparkles"></i> 自动生成商品宣传主图 / 朋友圈海报
-        </h2>
-        <span class="text-[11px] text-slate-500">一键生成高清发圈海报</span>
-      </div>
-
-      <!-- 快速选择已有商品一键套用 -->
-      <div class="p-2 bg-slate-800/60 rounded-lg border border-slate-700/60 flex items-center gap-2 text-xs">
-        <span class="text-indigo-400 font-bold shrink-0"><i class="fa-solid fa-bolt"></i> 快速套用商品:</span>
-        <select id="poster-category-preset" onchange="applyCategoryPreset(this.value)" class="flex-1 px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-bold">
-          <option value="">-- 点击快速选择任意商品出图 --</option>
-        </select>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div class="space-y-1">
-          <label class="text-xs text-slate-300">商品主标题</label>
-          <input type="text" id="poster-title" value="小火箭 Shadowrocket 独享账号" placeholder="商品主标题" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
-        </div>
-        <div class="space-y-1">
-          <label class="text-xs text-slate-300">标价与角标</label>
-          <div class="flex gap-2">
-            <input type="text" id="poster-price" value="￥4.99" placeholder="如 ￥4.99" class="w-1/2 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-emerald-400 font-bold">
-            <input type="text" id="poster-tag" value="官方正品 · 独享首发" placeholder="角标文案" class="w-1/2 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-indigo-300">
-          </div>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div class="space-y-1">
-          <label class="text-xs text-slate-300">核心卖点标签 (以空格隔开)</label>
-          <input type="text" id="poster-features" value="⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐全区畅享" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
-        </div>
-        <div class="space-y-1">
-          <label class="text-xs text-slate-300">海报配色风格</label>
-          <select id="poster-theme" onchange="generateProductPoster()" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
-            <option value="purple">🔮 极客霓虹紫 (Cyber Purple)</option>
-            <option value="darkgold">👑 奢华黑金 (Luxury Dark Gold)</option>
-            <option value="techblue">🌊 科技数码蓝 (Tech Blue)</option>
-            <option value="emerald">🍃 极简翡翠绿 (Clean Emerald)</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="flex gap-2 pt-1">
-        <button onclick="generateProductPoster()" class="flex-1 py-2 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-lg">
-          <i class="fa-solid fa-paintbrush"></i> 立即渲染生成图片
-        </button>
-        <button onclick="downloadProductPoster()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg text-xs flex items-center justify-center gap-1 border border-slate-700">
-          <i class="fa-solid fa-download"></i> 下载图片
-        </button>
-      </div>
-
-      <!-- 海报画布预览区 -->
-      <div class="flex justify-center p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 overflow-hidden">
-        <canvas id="poster-canvas" width="750" height="750" class="max-w-full h-auto rounded-lg shadow-2xl border border-slate-700/50" style="max-height: 380px;"></canvas>
       </div>
     </div>
 
@@ -2007,8 +2010,8 @@ function getAdminHTML(env) {
             }).join("");
           }
 
-          if (json.categories || json.category_prices) {
-            renderCategoryPriceTable(json.categories, json.category_prices);
+          if (json.categories || json.category_prices || json.category_images) {
+            renderCategoryPriceTable(json.categories, json.category_prices, json.category_images);
           }
 
           rBox.innerHTML = (json.recent || []).map(function(o) {
@@ -2030,98 +2033,57 @@ function getAdminHTML(env) {
 
     var currentCategories = ["美国", "香港", "日本", "台湾", "通用"];
     var currentCategoryPrices = {};
+    var currentCategoryImages = {};
 
-    function renderCategoryPriceTable(categories, prices) {
+    function renderCategoryPriceTable(categories, prices, images) {
       if (categories && Array.isArray(categories)) currentCategories = categories;
       if (prices && typeof prices === 'object') currentCategoryPrices = prices;
+      if (images && typeof images === 'object') currentCategoryImages = images;
       var container = document.getElementById("category-price-table");
       if (!container) return;
 
       var html = currentCategories.map(function(cat) {
         var p = currentCategoryPrices[cat] || "";
+        var imgUrl = currentCategoryImages[cat] || "";
         var encodedCat = encodeURIComponent(cat);
-        return '<div class="flex items-center gap-2 p-1.5 bg-slate-800/60 rounded-lg border border-slate-700/60">' +
-          '<span class="w-20 text-xs font-bold text-slate-200 truncate" title="' + cat + '">' + cat + '</span>' +
-          '<div class="relative flex-1">' +
-            '<span class="absolute left-2.5 top-1.5 text-slate-400 text-xs">￥</span>' +
-            '<input type="number" step="0.01" data-cat="' + encodedCat + '" value="' + p + '" placeholder="默认基准价" class="cat-price-input w-full pl-6 pr-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
+
+        var imgPreview = imgUrl ? 
+          '<img src="' + imgUrl + '" class="w-12 h-12 rounded-lg object-cover border border-indigo-500/40 shrink-0 shadow">' :
+          '<div class="w-12 h-12 rounded-lg bg-slate-950 text-slate-500 flex flex-col items-center justify-center text-[10px] shrink-0 border border-dashed border-slate-700"><i class="fa-solid fa-image text-xs mb-0.5"></i>无封面</div>';
+
+        var clearBtn = imgUrl ? 
+          '<button data-cat="' + encodedCat + '" onclick="clearCategoryImage(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded text-[11px] shrink-0 border border-rose-800/60 transition" title="清除图片"><i class="fa-solid fa-trash-can"></i></button>' : '';
+
+        return '<div class="p-2.5 bg-slate-800/80 rounded-xl border border-slate-700/70 space-y-2">' +
+          '<div class="flex items-center gap-3">' +
+            imgPreview +
+            '<div class="flex-1 min-w-0">' +
+              '<div class="flex items-center justify-between mb-1">' +
+                '<span class="text-xs font-bold text-white truncate">' + cat + '</span>' +
+                '<div class="flex items-center gap-1.5">' +
+                  '<label class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded text-[11px] cursor-pointer flex items-center gap-1 shadow transition">' +
+                    '<i class="fa-solid fa-upload"></i> 上传图片' +
+                    '<input type="file" accept="image/*" class="hidden" data-cat="' + encodedCat + '" onchange="handleCategoryFileUpload(decodeURIComponent(this.dataset.cat), this)">' +
+                  '</label>' +
+                  '<button data-cat="' + encodedCat + '" onclick="handleCategoryUrlInput(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-slate-900 hover:bg-slate-700 text-slate-300 font-medium rounded text-[11px] flex items-center gap-1 border border-slate-700 transition" title="填入网络图片链接">' +
+                    '<i class="fa-solid fa-link"></i> 填URL' +
+                  '</button>' +
+                  clearBtn +
+                '</div>' +
+              '</div>' +
+              '<div class="flex items-center gap-2">' +
+                '<span class="text-[11px] text-slate-400 shrink-0">专属单价:</span>' +
+                '<div class="relative flex-1">' +
+                  '<span class="absolute left-2 top-1 text-slate-500 text-xs">￥</span>' +
+                  '<input type="number" step="0.01" data-cat="' + encodedCat + '" value="' + p + '" placeholder="留空继承基准价" class="cat-price-input w-full pl-5 pr-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
           '</div>' +
-          '<button data-cat="' + encodedCat + '" onclick="autoGenerateForCategory(decodeURIComponent(this.dataset.cat))" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded text-[11px] shrink-0 flex items-center gap-1 shadow transition" title="一键生成【' + cat + '】的专属高清宣传海报">' +
-            '<i class="fa-solid fa-wand-magic-sparkles"></i> 出图' +
-          '</button>' +
         '</div>';
       }).join("");
 
       container.innerHTML = html;
-
-      // 同步更新海报生成器的快捷下拉框
-      var presetSelect = document.getElementById("poster-category-preset");
-      if (presetSelect) {
-        var opts = '<option value="">-- 点击快速选择任意商品出图 --</option>' +
-          currentCategories.map(function(c) {
-            var priceDisp = currentCategoryPrices[c] ? ' (￥' + currentCategoryPrices[c] + ')' : '';
-            return '<option value="' + c + '">' + c + priceDisp + '</option>';
-          }).join("");
-        presetSelect.innerHTML = opts;
-      }
-    }
-
-    function autoGenerateForCategory(cat) {
-      applyCategoryPreset(cat);
-      var posterSec = document.getElementById("poster-section");
-      if (posterSec) {
-        posterSec.scrollIntoView({ behavior: 'smooth' });
-      }
-    }
-
-    function applyCategoryPreset(cat) {
-      if (!cat) return;
-      var defaultPrice = document.getElementById("price-input").value.trim() || "4.99";
-      var catPrice = currentCategoryPrices[cat] || defaultPrice;
-
-      // 智能生成标题
-      var title = cat;
-      var tag = "官方正品 · 独享首发";
-      var feats = "⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐全区畅享";
-      var theme = "purple";
-
-      if (cat.indexOf("美国") !== -1 || cat.indexOf("香港") !== -1 || cat.indexOf("日本") !== -1 || cat.indexOf("台湾") !== -1) {
-        title = cat + " Apple ID 独享账号";
-        tag = "官方正品 · AppStore专用";
-        feats = "⚡自动秒发 🔒支持改密 🛡️2小时售后 🍏已购小火箭";
-        theme = "purple";
-      } else if (cat.toLowerCase().indexOf("chatgpt") !== -1 || cat.toLowerCase().indexOf("gpt") !== -1 || cat.toLowerCase().indexOf("ai") !== -1) {
-        title = cat + " 独享原生账号";
-        tag = "智能AI · 独享首发";
-        feats = "⚡自动发货 🤖支持GPT-4o 🔒原生独享 🛡️质保稳定";
-        theme = "techblue";
-      } else if (cat.toLowerCase().indexOf("netflix") !== -1 || cat.toLowerCase().indexOf("奈飞") !== -1 || cat.toLowerCase().indexOf("spotify") !== -1) {
-        title = cat + " 4K 高级独享会员";
-        tag = "影音娱乐 · 极速出卡";
-        feats = "⚡自动发货 🎬4K超高清 🔒独立车位 🛡️质保包换";
-        theme = "darkgold";
-      } else if (cat === "通用") {
-        title = "小火箭 Shadowrocket 独享账号";
-        tag = "官方正品 · 独享首发";
-        feats = "⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐极速下载";
-        theme = "purple";
-      } else {
-        title = cat + " 独享专卖";
-        tag = "精品热销 · 自动出卡";
-        feats = "⚡自动秒发 🔒安全独享 🛡️正品保障 🚀极速交付";
-        theme = "emerald";
-      }
-
-      document.getElementById("poster-title").value = title;
-      document.getElementById("poster-price").value = "￥" + parseFloat(catPrice).toFixed(2);
-      document.getElementById("poster-tag").value = tag;
-      document.getElementById("poster-features").value = feats;
-      document.getElementById("poster-theme").value = theme;
-
-      var presetSelect = document.getElementById("poster-category-preset");
-      if (presetSelect) presetSelect.value = cat;
-
-      generateProductPoster();
     }
 
     function addCustomCategoryPriceRow() {
@@ -2131,7 +2093,86 @@ function getAdminHTML(env) {
       if (currentCategories.indexOf(catName) === -1) {
         currentCategories.push(catName);
       }
-      renderCategoryPriceTable(currentCategories, currentCategoryPrices);
+      renderCategoryPriceTable(currentCategories, currentCategoryPrices, currentCategoryImages);
+    }
+
+    async function handleCategoryFileUpload(region, inputEl) {
+      if (!inputEl.files || inputEl.files.length === 0) return;
+      var file = inputEl.files[0];
+      var key = document.getElementById("admin-key").value.trim();
+
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var img = new Image();
+        img.onload = async function() {
+          var canvas = document.createElement("canvas");
+          var maxDim = 400;
+          var w = img.width, h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+            else { w = Math.round(w * maxDim / h); h = maxDim; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          var compressedBase64 = canvas.toDataURL("image/jpeg", 0.85);
+
+          try {
+            var res = await fetch("/api/admin/set_category_image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key: key, region: region, image_url: compressedBase64 })
+            });
+            var json = await res.json();
+            alert(json.msg || "封面设置成功");
+            loadAdminData();
+          } catch (err) {
+            alert("上传异常，请重试");
+          }
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function handleCategoryUrlInput(region) {
+      var key = document.getElementById("admin-key").value.trim();
+      var currentUrl = currentCategoryImages[region] || "";
+      var inputUrl = prompt("请输入【" + region + "】的商品封面图片网络链接 (URL)：", currentUrl);
+      if (inputUrl === null) return;
+      inputUrl = inputUrl.trim();
+
+      try {
+        var res = await fetch("/api/admin/set_category_image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, region: region, image_url: inputUrl })
+        });
+        var json = await res.json();
+        alert(json.msg || "设置成功");
+        loadAdminData();
+      } catch(e) {
+        alert("设置失败");
+      }
+    }
+
+    async function clearCategoryImage(region) {
+      var key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确定要清除【" + region + "】的自定义封面图片吗？")) return;
+
+      try {
+        var res = await fetch("/api/admin/set_category_image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, region: region, image_url: "" })
+        });
+        var json = await res.json();
+        alert(json.msg || "清除成功");
+        loadAdminData();
+      } catch(e) {
+        alert("清除失败");
+      }
     }
 
     async function saveCategoryPrices() {
@@ -2357,214 +2398,7 @@ function getAdminHTML(env) {
       }
     }
 
-    // 通用兼容圆角矩形绘制函数 (100% 兼容所有浏览器及移动端 WebView)
-    function drawRoundedRect(ctx, x, y, w, h, r) {
-      if (w < 2 * r) r = w / 2;
-      if (h < 2 * r) r = h / 2;
-      ctx.beginPath();
-      ctx.moveTo(x + r, y);
-      ctx.arcTo(x + w, y, x + w, y + h, r);
-      ctx.arcTo(x + w, y + h, x, y + h, r);
-      ctx.arcTo(x, y + h, x, y, r);
-      ctx.arcTo(x, y, x + w, y, r);
-      ctx.closePath();
-    }
-
-    // 🎨 纯 Canvas 自动渲染生成高品质电商商品宣传海报图
-    function generateProductPoster() {
-      try {
-        var canvas = document.getElementById("poster-canvas");
-        if (!canvas) return;
-        var ctx = canvas.getContext("2d");
-        if (!ctx) return;
-        var w = canvas.width, h = canvas.height;
-
-        var title = document.getElementById("poster-title").value.trim() || "小火箭 Shadowrocket 独享账号";
-        var price = document.getElementById("poster-price").value.trim() || "￥4.99";
-        var tag = document.getElementById("poster-tag").value.trim() || "官方正品 · 独享首发";
-        var feats = document.getElementById("poster-features").value.trim().split(/\s+/).filter(Boolean);
-        var theme = document.getElementById("poster-theme").value;
-
-        var c1 = "#09090b", c2 = "#1e1138", accent = "#a855f7", badgeBg = "rgba(168, 85, 247, 0.15)", glowColor = "rgba(168, 85, 247, 0.35)";
-        if (theme === "darkgold") {
-          c1 = "#0c0a09"; c2 = "#292524"; accent = "#f59e0b"; badgeBg = "rgba(245, 158, 11, 0.15)"; glowColor = "rgba(245, 158, 11, 0.35)";
-        } else if (theme === "techblue") {
-          c1 = "#030712"; c2 = "#0f172a"; accent = "#38bdf8"; badgeBg = "rgba(56, 189, 248, 0.15)"; glowColor = "rgba(56, 189, 248, 0.35)";
-        } else if (theme === "emerald") {
-          c1 = "#022c22"; c2 = "#064e3b"; accent = "#10b981"; badgeBg = "rgba(16, 185, 129, 0.15)"; glowColor = "rgba(16, 185, 129, 0.35)";
-        }
-
-        // 1. 背景渐变
-        var bgGrad = ctx.createLinearGradient(0, 0, w, h);
-        bgGrad.addColorStop(0, c1);
-        bgGrad.addColorStop(0.6, c2);
-        bgGrad.addColorStop(1, "#000000");
-        ctx.fillStyle = bgGrad;
-        ctx.fillRect(0, 0, w, h);
-
-        // 2. 光晕特效
-        var glow1 = ctx.createRadialGradient(w * 0.85, h * 0.15, 10, w * 0.85, h * 0.15, 320);
-        glow1.addColorStop(0, glowColor);
-        glow1.addColorStop(1, "transparent");
-        ctx.fillStyle = glow1;
-        ctx.fillRect(0, 0, w, h);
-
-        var glow2 = ctx.createRadialGradient(w * 0.15, h * 0.85, 10, w * 0.15, h * 0.85, 280);
-        glow2.addColorStop(0, glowColor);
-        glow2.addColorStop(1, "transparent");
-        ctx.fillStyle = glow2;
-        ctx.fillRect(0, 0, w, h);
-
-        // 3. 中心磨砂卡片
-        var pad = 36;
-        var cardX = pad, cardY = pad, cardW = w - pad * 2, cardH = h - pad * 2;
-        ctx.save();
-        ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
-        ctx.lineWidth = 2;
-        drawRoundedRect(ctx, cardX, cardY, cardW, cardH, 28);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-
-        // 4. 顶部标签
-        ctx.save();
-        var tagX = cardX + 36, tagY = cardY + 40;
-        ctx.fillStyle = badgeBg;
-        ctx.strokeStyle = accent;
-        ctx.lineWidth = 1.5;
-        drawRoundedRect(ctx, tagX, tagY, 240, 38, 19);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = accent;
-        ctx.font = "bold 15px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("✦ " + tag, tagX + 120, tagY + 19);
-        ctx.restore();
-
-        // 5. 商品主标题
-        ctx.save();
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 36px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.shadowColor = "rgba(0,0,0,0.6)";
-        ctx.shadowBlur = 12;
-        
-        var lines = title.length > 13 ? [title.slice(0, 13), title.slice(13)] : [title];
-        var titleY = cardY + 98;
-        lines.forEach(function(line, idx) {
-          ctx.fillText(line, cardX + 36, titleY + (idx * 48));
-        });
-        ctx.restore();
-
-        // 6. 卖点特性标签
-        ctx.save();
-        var featY = cardY + 215;
-        var chipW = (cardW - 72 - 16) / 2;
-        var chipH = 48;
-        feats.slice(0, 4).forEach(function(feat, idx) {
-          var col = idx % 2;
-          var row = Math.floor(idx / 2);
-          var cx = cardX + 36 + col * (chipW + 16);
-          var cy = featY + row * (chipH + 12);
-
-          ctx.fillStyle = "rgba(30, 41, 59, 0.88)";
-          ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-          ctx.lineWidth = 1;
-          drawRoundedRect(ctx, cx, cy, chipW, chipH, 12);
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.fillStyle = "#f1f5f9";
-          ctx.font = "bold 15px -apple-system, sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(feat, cx + chipW / 2, cy + chipH / 2);
-        });
-        ctx.restore();
-
-        // 7. 价格区域 Banner
-        ctx.save();
-        var priceBoxY = cardY + 348;
-        var priceBoxH = 115;
-        var pGrad = ctx.createLinearGradient(cardX + 36, priceBoxY, cardX + cardW - 36, priceBoxY + priceBoxH);
-        pGrad.addColorStop(0, "rgba(24, 24, 27, 0.95)");
-        pGrad.addColorStop(1, "rgba(39, 39, 42, 0.95)");
-        ctx.fillStyle = pGrad;
-        ctx.strokeStyle = accent;
-        ctx.lineWidth = 2;
-        drawRoundedRect(ctx, cardX + 36, priceBoxY, cardW - 72, priceBoxH, 20);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "14px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText("限时抢购特惠价", cardX + 60, priceBoxY + 35);
-
-        ctx.fillStyle = accent;
-        ctx.font = "900 46px -apple-system, sans-serif";
-        ctx.fillText(price, cardX + 60, priceBoxY + 84);
-
-        // 右侧按钮
-        var btnW = 150, btnH = 48;
-        var btnX = cardX + cardW - 36 - 24 - btnW;
-        var btnY = priceBoxY + 34;
-        var btnGrad = ctx.createLinearGradient(btnX, btnY, btnX + btnW, btnY + btnH);
-        btnGrad.addColorStop(0, accent);
-        btnGrad.addColorStop(1, "#ec4899");
-        ctx.fillStyle = btnGrad;
-        drawRoundedRect(ctx, btnX, btnY, btnW, btnH, 24);
-        ctx.fill();
-
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 17px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText("立即抢购 ➔", btnX + btnW / 2, btnY + btnH / 2);
-        ctx.restore();
-
-        // 8. 底部发货说明与网址
-        ctx.save();
-        var footerY = cardY + cardH - 85;
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
-        ctx.beginPath();
-        ctx.moveTo(cardX + 36, footerY - 12);
-        ctx.lineTo(cardX + cardW - 36, footerY - 12);
-        ctx.stroke();
-
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 16px sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText("🚀 全自动发卡平台 · 7×24小时秒级出卡", cardX + 36, footerY + 16);
-
-        ctx.fillStyle = "#64748b";
-        ctx.font = "13px font-mono, sans-serif";
-        ctx.fillText("认准官网: " + window.location.origin, cardX + 36, footerY + 44);
-        ctx.restore();
-      } catch(err) {
-        console.error("生成海报异常:", err);
-      }
-    }
-
-    function downloadProductPoster() {
-      try {
-        var canvas = document.getElementById("poster-canvas");
-        if (!canvas) return;
-        var a = document.createElement("a");
-        a.download = (document.getElementById("poster-title").value.trim() || "商品海报") + ".png";
-        a.href = canvas.toDataURL("image/png");
-        a.click();
-      } catch(e) {
-        alert("下载失败: " + e.message);
-      }
-    }
-
     loadAdminData();
-    generateProductPoster();
     var adminPollTimer = setInterval(loadAdminData, 4000);
 
     // 智能节流：离开页面/锁屏时自动停止请求，切回页面时立即刷新并恢复
