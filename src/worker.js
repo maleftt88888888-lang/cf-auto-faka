@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统 (方案 A: 买家凭微信账单单号自助秒提出卡)
+ * Cloudflare Worker - 智能自动抓取发卡系统 (支持：买家自助提卡 + 密码错误自动重新抓取换新号)
  */
 
 export default {
@@ -121,11 +121,9 @@ export default {
           return jsonResponse({ code: -1, msg: "请正确输入微信支付凭证中的交易单号（至少后4位）" }, corsHeaders);
         }
 
-        // 1. 查询订单
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
 
-        // 如果该订单已经出卡，直接返回
         if (order.status === 1 && order.carmi) {
           return jsonResponse({
             code: 0,
@@ -134,22 +132,28 @@ export default {
           }, corsHeaders);
         }
 
-        // 2. 检查该交易单号是否已被他人冒领 (防重复刷卡)
         const usedCheck = await env.DB.prepare("SELECT id FROM orders WHERE pay_type = ? AND id != ?").bind(`微信单号:${tradeNo}`, order.id).first();
         if (usedCheck) {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        // 3. 从对应地区库存取出一张未售出的卡密
-        const carmiRecord = await env.DB.prepare(
+        // 从对应地区库存取出一张未售出的卡密
+        let carmiRecord = await env.DB.prepare(
           "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
         ).bind(order.region).first();
+
+        // 如果库存不足，自动实时抓取一次
+        if (!carmiRecord) {
+          await syncAccountsFromSource(env);
+          carmiRecord = await env.DB.prepare(
+            "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
+          ).bind(order.region).first();
+        }
 
         if (!carmiRecord) {
           return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密，请联系站长补发！` }, corsHeaders);
         }
 
-        // 4. 原子标记卡密已售出并完成订单
         await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
         await env.DB.prepare(`
           UPDATE orders 
@@ -163,6 +167,51 @@ export default {
           data: {
             order_no: orderNo,
             carmi: carmiRecord.carmi,
+            region: order.region
+          }
+        }, corsHeaders);
+      }
+
+      // 路由 3.5: 密码错误自助换号（自动实时重抓源站最新账号换新）
+      if (path === "/api/order/replace" && request.method === "POST") {
+        const body = await request.json();
+        const orderNo = (body.order_no || "").trim();
+
+        if (!orderNo) return jsonResponse({ code: -1, msg: "缺少订单号" }, corsHeaders);
+
+        const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 1").bind(orderNo).first();
+        if (!order) return jsonResponse({ code: -1, msg: "未找到已完成的有效订单" }, corsHeaders);
+
+        // 1. 自动实时从目标源站抓取最新账号
+        console.log(`🔄 买家针对订单 ${orderNo} 申请换号，正在实时抓取源站最新账号...`);
+        await syncAccountsFromSource(env);
+
+        // 2. 从对应地区提取一个不是当前卡密的全新账号
+        let newCarmiRecord = await env.DB.prepare(
+          "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 AND carmi != ? ORDER BY RANDOM() LIMIT 1"
+        ).bind(order.region, order.carmi || "").first();
+
+        if (!newCarmiRecord) {
+          // 如果没有未售库存，随机取一个最近更新的有效账号
+          newCarmiRecord = await env.DB.prepare(
+            "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND carmi != ? ORDER BY id DESC LIMIT 1"
+          ).bind(order.region, order.carmi || "").first();
+        }
+
+        if (!newCarmiRecord) {
+          return jsonResponse({ code: -1, msg: "暂无可替换的新账号，请稍后再试！" }, corsHeaders);
+        }
+
+        // 3. 更新订单的卡密为全新卡密
+        await env.DB.prepare("UPDATE orders SET carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(newCarmiRecord.carmi, orderNo).run();
+        await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, newCarmiRecord.id).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "🎉 已为您从源站成功获取并换发最新账号！",
+          data: {
+            order_no: orderNo,
+            carmi: newCarmiRecord.carmi,
             region: order.region
           }
         }, corsHeaders);
@@ -447,7 +496,7 @@ function jsonResponse(data, headers = {}, status = 200) {
 }
 
 /**
- * 买家前台页面 (支持扫码后直接输入单号自助秒提出卡)
+ * 买家前台页面 (支持自主秒提卡 + 密码错误一键自动换新号)
  */
 function getFrontendHTML(env) {
   const siteName = env.SITE_NAME || "小火箭账号";
@@ -472,7 +521,7 @@ function getFrontendHTML(env) {
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
       <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
-      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时库存同步 · 微信扫码自助秒出号</p>
+      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时库存同步 · 密码错误支持一键换号</p>
     </div>
 
     <div class="glass rounded-2xl p-6 sm:p-8 shadow-2xl mb-6">
@@ -560,7 +609,7 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
-    <!-- 弹窗 2：发卡成功结果 -->
+    <!-- 弹窗 2：发卡成功结果 (含一键换号售后按钮) -->
     <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
       <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40">
         <div class="text-center">
@@ -573,7 +622,12 @@ function getFrontendHTML(env) {
 
         <div class="bg-slate-900/90 rounded-xl p-4 border border-slate-800 space-y-3">
           <div>
-            <span class="text-xs text-slate-400 block mb-1">账号密码：</span>
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-xs text-slate-400">账号密码卡密：</span>
+              <button onclick="replaceCarmi()" id="btn-replace" class="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1">
+                <i class="fa-solid fa-rotate"></i> 密码错误？免费换号
+              </button>
+            </div>
             <div id="res-carmi" class="text-sm font-mono text-emerald-400 select-all break-all bg-slate-950 p-3 rounded-lg border border-slate-800"></div>
           </div>
         </div>
@@ -707,6 +761,47 @@ function getFrontendHTML(env) {
       }
     }
 
+    async function replaceCarmi(orderNoToReplace) {
+      const targetOrderNo = orderNoToReplace || currentOrderNo;
+      if (!targetOrderNo) return alert("缺少订单号");
+
+      if (!confirm("确定此账号无法登录？系统将立即自动从源站获取最新账号为您免费更换！")) return;
+
+      const btn = document.getElementById("btn-replace");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在抓取最新账号换新...';
+      }
+
+      try {
+        const res = await fetch("/api/order/replace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order_no: targetOrderNo })
+        });
+        const json = await res.json();
+        if (json.code === 0) {
+          alert("🎉 换号成功！已为您换发源站最新账号！");
+          if (document.getElementById("res-carmi")) {
+            document.getElementById("res-carmi").innerText = json.data.carmi;
+          }
+          if (!document.getElementById("panel-query").classList.contains("hidden")) {
+            queryOrders();
+          }
+          loadStats();
+        } else {
+          alert(json.msg || "换号失败，请稍后重试");
+        }
+      } catch (err) {
+        alert("换号请求失败");
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-rotate"></i> 密码错误？免费换号';
+        }
+      }
+    }
+
     function cancelPay() {
       document.getElementById("modal-pay").classList.add("hidden");
     }
@@ -731,7 +826,10 @@ function getFrontendHTML(env) {
               <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
                 \${o.status === 1 ? o.carmi : '<span class="text-amber-400">未提取/处理中</span>'}
               </div>
-              <div class="text-xs text-slate-500">下单时间: \${o.created_at}</div>
+              <div class="flex justify-between items-center text-xs text-slate-500 pt-1">
+                <span>下单时间: \${o.created_at}</span>
+                \${o.status === 1 ? \`<button onclick="replaceCarmi('\${o.order_no}')" class="text-amber-400 hover:text-amber-300 font-medium"><i class="fa-solid fa-rotate"></i> 密码错误？换号</button>\` : ''}
+              </div>
             </div>
           \`).join("");
         } else {
@@ -788,7 +886,7 @@ function getAdminHTML(env) {
 <body class="p-4 max-w-2xl mx-auto">
   <div class="mb-6 flex justify-between items-center border-b border-slate-800 pb-4">
     <h1 class="text-xl font-bold flex items-center gap-2 text-indigo-400">
-      <i class="fa-solid fa-shield-halved"></i> 站长控制台 (自助提卡模式)
+      <i class="fa-solid fa-shield-halved"></i> 站长控制台 (售后自动换号版)
     </h1>
     <a href="/" class="text-xs text-slate-400 hover:text-white">返回首页</a>
   </div>
