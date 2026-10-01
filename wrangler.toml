@@ -6,21 +6,16 @@ compatibility_date = "2024-01-01"
 [triggers]
 crons = ["0 * * * *"]
 
-# D1 数据库绑定（在 Cloudflare 后台创建 D1 后绑定）
+# D1 数据库绑定
 [[d1_databases]]
 binding = "DB"
 database_name = "faka-db"
-database_id = "YOUR_D1_DATABASE_ID"
+database_id = "3ad9ee3f-166f-4446-9a00-b39c8fcb2ecf"
 
 # 环境变量配置
 [vars]
 SITE_NAME = "云账号智能发卡平台"
-ADMIN_KEY = "admin123456" # 管理员手动同步秘钥
+ADMIN_KEY = "admin123456" # 管理员后台秘钥
 TARGET_URL = "https://haogd.top/share/app"
-PRICE_PER_ACCOUNT = "1.00" # 每个账号单价（元）
-
-# ----------------- 汇源开放平台 / 易支付配置 -----------------
-# （留空时为免支付测试出卡模式，填入后自动开启真实微信/支付宝收款）
-PAY_URL = "https://汇源支付网关/submit.php"   # 汇源开放平台的支付提交网关URL
-PAY_PID = ""                                 # 汇源平台的商户 ID
-PAY_KEY = ""                                 # 汇源平台的商户 KEY (密钥)
+PRICE_PER_ACCOUNT = "1.00" # 账号单价（元）
+PAY_QRCODE_URL = "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"

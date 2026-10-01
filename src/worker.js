@@ -186,9 +186,50 @@ export default {
         const result = await syncAccountsFromSource(env);
         return jsonResponse({
           code: 0,
-          msg: `同步完成！本次新增入库 ${result.inserted} 条卡密，总解析到 ${result.total} 条账号。`,
+          msg: result.error ? `同步失败: ${result.error}` : `同步完成！本次新增入库 ${result.inserted} 条卡密，总解析到 ${result.total} 条账号。`,
           data: result
         }, corsHeaders);
+      }
+
+      // 路由 6.1: 管理员手动批量导入卡密
+      if (path === "/api/admin/import" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "admin123456")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+        const lines = (body.text || "").split("\n");
+        const defaultRegion = body.region || "美国";
+        let imported = 0;
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          try {
+            await env.DB.prepare(`
+              INSERT INTO carmis (region, account, password, carmi, status, created_at)
+              VALUES (?, ?, ?, ?, 0, datetime('now'))
+            `).bind(defaultRegion, line, line, line).run();
+            imported++;
+          } catch (e) {}
+        }
+
+        return jsonResponse({
+          code: 0,
+          msg: `成功导入 ${imported} 条卡密！`
+        }, corsHeaders);
+      }
+
+      // 路由 6.2: 调试抓取页面源码
+      if (path === "/api/admin/debug_fetch") {
+        const targetUrl = env.TARGET_URL || "https://haogd.top/share/app";
+        const res = await fetch(targetUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          }
+        });
+        const text = await res.text();
+        return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
       }
 
       // 路由 7: 历史订单查询
@@ -245,6 +286,10 @@ async function syncAccountsFromSource(env) {
       }
     });
 
+    if (!res.ok) {
+      return { total: 0, inserted: 0, error: `目标源站响应异常 HTTP ${res.status}: ${res.statusText}` };
+    }
+
     const html = await res.text();
     const accountPattern = /(?:账号地区[：:]\s*([^\s\r\n<]+))?[\s\S]*?(?:账号[：:]\s*([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+))[\s\S]*?(?:密码[：:]\s*([^\s\r\n<]+))/gi;
     const fallbackPattern = /([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\s+([a-zA-Z0-9!@#$%^&*()_+=\-`~]{6,30})/gi;
@@ -283,6 +328,7 @@ async function syncAccountsFromSource(env) {
     console.log(`✅ 抓取同步成功: 共解析 ${total} 条，成功新增入库 ${inserted} 条`);
   } catch (err) {
     console.error("❌ 抓取同步出错:", err);
+    return { total: 0, inserted: 0, error: err.message };
   }
 
   return { total, inserted };
@@ -649,6 +695,28 @@ function getAdminHTML(env) {
       </div>
     </div>
 
+    <!-- 手动批量导入卡密 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-file-import"></i> 批量导入卡密
+      </h2>
+      <div class="space-y-2">
+        <div class="flex gap-2">
+          <select id="import-region" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+            <option value="美国">美国</option>
+            <option value="香港">香港</option>
+            <option value="日本">日本</option>
+            <option value="台湾">台湾</option>
+            <option value="通用">通用</option>
+          </select>
+          <button onclick="importCarmis()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs">
+            确认导入
+          </button>
+        </div>
+        <textarea id="import-text" rows="3" placeholder="一行一条卡密，例如：&#10;账号: xxx@outlook.com ---- 密码: xxx&#10;账号: yyy@outlook.com ---- 密码: yyy" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-white"></textarea>
+      </div>
+    </div>
+
     <!-- 最近已出卡记录 -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
       <h2 class="font-bold text-slate-300 text-sm">最近已发卡记录</h2>
@@ -731,6 +799,27 @@ function getAdminHTML(env) {
         alert(json.msg);
       } catch (e) {
         alert("同步请求失败");
+      }
+    }
+
+    async function importCarmis() {
+      const key = document.getElementById("admin-key").value.trim();
+      const region = document.getElementById("import-region").value;
+      const text = document.getElementById("import-text").value.trim();
+      if (!text) return alert("请输入要导入的卡密内容");
+
+      try {
+        const res = await fetch("/api/admin/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, region, text })
+        });
+        const json = await res.json();
+        alert(json.msg || "导入完成");
+        document.getElementById("import-text").value = "";
+        loadAdminData();
+      } catch (e) {
+        alert("导入失败");
       }
     }
 
