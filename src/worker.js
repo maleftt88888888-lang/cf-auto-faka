@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统 (支持：买家自助提卡 + 密码错误自动重新抓取换新号)
+ * Cloudflare Worker - 智能自动抓取发卡系统 (全方位记忆与订单随时找回版)
  */
 
 export default {
@@ -137,12 +137,10 @@ export default {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        // 从对应地区库存取出一张未售出的卡密
         let carmiRecord = await env.DB.prepare(
           "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
         ).bind(order.region).first();
 
-        // 如果库存不足，自动实时抓取一次
         if (!carmiRecord) {
           await syncAccountsFromSource(env);
           carmiRecord = await env.DB.prepare(
@@ -172,7 +170,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 3.5: 密码错误自助换号（自动实时重抓源站最新账号换新）
+      // 路由 3.5: 密码错误自助换号
       if (path === "/api/order/replace" && request.method === "POST") {
         const body = await request.json();
         const orderNo = (body.order_no || "").trim();
@@ -182,17 +180,14 @@ export default {
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 1").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "未找到已完成的有效订单" }, corsHeaders);
 
-        // 1. 自动实时从目标源站抓取最新账号
         console.log(`🔄 买家针对订单 ${orderNo} 申请换号，正在实时抓取源站最新账号...`);
         await syncAccountsFromSource(env);
 
-        // 2. 从对应地区提取一个不是当前卡密的全新账号
         let newCarmiRecord = await env.DB.prepare(
           "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 AND carmi != ? ORDER BY RANDOM() LIMIT 1"
         ).bind(order.region, order.carmi || "").first();
 
         if (!newCarmiRecord) {
-          // 如果没有未售库存，随机取一个最近更新的有效账号
           newCarmiRecord = await env.DB.prepare(
             "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND carmi != ? ORDER BY id DESC LIMIT 1"
           ).bind(order.region, order.carmi || "").first();
@@ -202,7 +197,6 @@ export default {
           return jsonResponse({ code: -1, msg: "暂无可替换的新账号，请稍后再试！" }, corsHeaders);
         }
 
-        // 3. 更新订单的卡密为全新卡密
         await env.DB.prepare("UPDATE orders SET carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(newCarmiRecord.carmi, orderNo).run();
         await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, newCarmiRecord.id).run();
 
@@ -222,14 +216,15 @@ export default {
         const orderNo = url.searchParams.get("order_no");
         if (!orderNo) return jsonResponse({ code: -1, msg: "缺少订单号" }, corsHeaders);
 
-        const order = await env.DB.prepare("SELECT order_no, status, carmi, region FROM orders WHERE order_no = ?").bind(orderNo).first();
+        const order = await env.DB.prepare("SELECT order_no, status, carmi, region, price FROM orders WHERE order_no = ?").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
 
         return jsonResponse({
           code: 0,
           status: order.status,
           carmi: order.carmi || "",
-          region: order.region
+          region: order.region,
+          price: order.price
         }, corsHeaders);
       }
 
@@ -388,9 +383,9 @@ export default {
         const orders = await env.DB.prepare(`
           SELECT order_no, region, contact, price, status, carmi, created_at, paid_at
           FROM orders
-          WHERE order_no = ? OR contact = ?
+          WHERE order_no = ? OR contact = ? OR pay_type LIKE ?
           ORDER BY id DESC LIMIT 10
-        `).bind(queryVal, queryVal).all();
+        `).bind(queryVal, queryVal, `%${queryVal}%`).all();
 
         return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
       }
@@ -496,7 +491,7 @@ function jsonResponse(data, headers = {}, status = 200) {
 }
 
 /**
- * 买家前台页面 (支持自主秒提卡 + 密码错误一键自动换新号)
+ * 买家前台页面 (支持：断网/关网页自动恢复最近订单 + 随时找回最新卡号)
  */
 function getFrontendHTML(env) {
   const siteName = env.SITE_NAME || "小火箭账号";
@@ -516,12 +511,23 @@ function getFrontendHTML(env) {
 </head>
 <body class="py-8 px-4 flex flex-col items-center">
   <div class="max-w-3xl w-full">
+    <!-- 自动恢复最近订单横幅 -->
+    <div id="recent-order-banner" class="hidden mb-4 p-3.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between items-center text-xs">
+      <div class="flex items-center gap-2 text-indigo-200">
+        <i class="fa-solid fa-clock-rotate-left text-indigo-400"></i>
+        <span>检测到您有一笔最近的订单：<b id="banner-order-no" class="font-mono text-emerald-400"></b></span>
+      </div>
+      <button onclick="restoreRecentOrder()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg transition">
+        查看/提取卡密
+      </button>
+    </div>
+
     <div class="text-center mb-8">
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-4 border border-indigo-500/30">
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
       <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
-      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时库存同步 · 密码错误支持一键换号</p>
+      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
     </div>
 
     <div class="glass rounded-2xl p-6 sm:p-8 shadow-2xl mb-6">
@@ -530,7 +536,7 @@ function getFrontendHTML(env) {
           <i class="fa-solid fa-cart-shopping"></i> 在线下单
         </button>
         <button id="tab-query" onclick="switchTab('query')" class="py-2.5 px-6 font-medium text-slate-400 hover:text-slate-200 flex items-center gap-2">
-          <i class="fa-solid fa-magnifying-glass"></i> 订单查询
+          <i class="fa-solid fa-magnifying-glass"></i> 订单查询 (找回卡密)
         </button>
       </div>
 
@@ -543,8 +549,8 @@ function getFrontendHTML(env) {
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-2">联系方式 (用于查单/找回卡密)：</label>
-          <input type="text" id="contact" placeholder="填写您的邮箱或手机号" class="w-full px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
+          <label class="block text-sm font-medium text-slate-300 mb-2">联系方式 (用于查单/随时找回卡密)：</label>
+          <input type="text" id="contact" placeholder="强烈建议填写您的手机号或QQ/邮箱" class="w-full px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
         </div>
 
         <div class="pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -560,11 +566,11 @@ function getFrontendHTML(env) {
 
       <div id="panel-query" class="space-y-6 hidden">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-2">输入订单号或联系方式：</label>
+          <label class="block text-sm font-medium text-slate-300 mb-2">输入订单号、联系方式或微信单号找回：</label>
           <div class="flex gap-2">
-            <input type="text" id="query-keyword" placeholder="输入订单号或购买时填写的联系方式" class="flex-1 px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
+            <input type="text" id="query-keyword" placeholder="输入订单号 / 手机号 / 邮箱 / 微信交易单号" class="flex-1 px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
             <button onclick="queryOrders()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl transition">
-              <i class="fa-solid fa-search"></i> 查询
+              <i class="fa-solid fa-search"></i> 查询找回
             </button>
           </div>
         </div>
@@ -587,7 +593,6 @@ function getFrontendHTML(env) {
           微信扫码支付固定金额：<span class="text-emerald-400 font-bold text-base" id="pay-money">￥4.99</span>
         </div>
 
-        <!-- 自助提卡输入区域 -->
         <div class="bg-indigo-950/50 border border-indigo-500/30 rounded-xl p-3 text-left space-y-2">
           <label class="text-xs text-indigo-300 block font-medium">
             <i class="fa-solid fa-receipt"></i> 付款后输入【微信账单交易单号后4位】：
@@ -599,17 +604,17 @@ function getFrontendHTML(env) {
             </button>
           </div>
           <div class="text-[11px] text-slate-400 leading-tight">
-            * 微信付款后，点进账单详情即可查看交易单号。
+            * 付款后点进微信账单详情即可查看交易单号。
           </div>
         </div>
 
         <button onclick="cancelPay()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 font-medium rounded-xl text-xs transition">
-          取消 / 返回
+          关闭 (关闭后可随时查单找回)
         </button>
       </div>
     </div>
 
-    <!-- 弹窗 2：发卡成功结果 (含一键换号售后按钮) -->
+    <!-- 弹窗 2：发卡成功结果 -->
     <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
       <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40">
         <div class="text-center">
@@ -667,6 +672,41 @@ function getFrontendHTML(env) {
       } catch (e) {
         console.error("加载失败", e);
       }
+      checkSavedRecentOrder();
+    }
+
+    // 检查本地保存的最近订单
+    function checkSavedRecentOrder() {
+      const saved = localStorage.getItem("faka_recent_order");
+      if (saved) {
+        currentOrderNo = saved;
+        document.getElementById("banner-order-no").innerText = saved;
+        document.getElementById("recent-order-banner").classList.remove("hidden");
+      }
+    }
+
+    async function restoreRecentOrder() {
+      if (!currentOrderNo) return;
+      try {
+        const res = await fetch("/api/order/check?order_no=" + currentOrderNo);
+        const json = await res.json();
+        if (json.code === 0) {
+          if (json.status === 1 && json.carmi) {
+            // 已出卡，直接弹出发卡结果
+            document.getElementById("res-order-no").innerText = currentOrderNo;
+            document.getElementById("res-carmi").innerText = json.carmi;
+            document.getElementById("modal-result").classList.remove("hidden");
+          } else {
+            // 待提卡，弹出扫码提卡窗口
+            document.getElementById("pay-money").innerText = "￥" + json.price;
+            document.getElementById("modal-pay").classList.remove("hidden");
+          }
+        } else {
+          alert("订单查询失败");
+        }
+      } catch (e) {
+        alert("请求异常");
+      }
     }
 
     function renderRegions() {
@@ -712,6 +752,9 @@ function getFrontendHTML(env) {
         const data = await res.json();
         if (data.code === 0) {
           currentOrderNo = data.data.order_no;
+          localStorage.setItem("faka_recent_order", currentOrderNo);
+          checkSavedRecentOrder();
+
           document.getElementById("pay-money").innerText = "￥" + data.data.price;
           document.getElementById("trade-no-input").value = "";
           document.getElementById("modal-pay").classList.remove("hidden");
@@ -726,27 +769,30 @@ function getFrontendHTML(env) {
       }
     }
 
-    async function claimCarmi() {
+    async function claimCarmi(orderNoOverride) {
+      const targetOrder = orderNoOverride || currentOrderNo;
       const tradeNo = document.getElementById("trade-no-input").value.trim();
       if (!tradeNo || tradeNo.length < 4) {
         return alert("请输入微信支付交易单号（至少后4位）");
       }
-      if (!currentOrderNo) return alert("订单已失效，请重新下单");
+      if (!targetOrder) return alert("订单已失效，请重新下单");
 
       const btn = document.getElementById("btn-claim");
-      btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 核验中...';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 核验中...';
+      }
 
       try {
         const res = await fetch("/api/order/claim", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ order_no: currentOrderNo, trade_no: tradeNo })
+          body: JSON.stringify({ order_no: targetOrder, trade_no: tradeNo })
         });
         const json = await res.json();
         if (json.code === 0) {
           document.getElementById("modal-pay").classList.add("hidden");
-          document.getElementById("res-order-no").innerText = currentOrderNo;
+          document.getElementById("res-order-no").innerText = targetOrder;
           document.getElementById("res-carmi").innerText = json.data.carmi;
           document.getElementById("modal-result").classList.remove("hidden");
           loadStats();
@@ -756,8 +802,10 @@ function getFrontendHTML(env) {
       } catch (err) {
         alert("网络异常，请稍后重试");
       } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-key"></i> 立即提卡';
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-key"></i> 立即提卡';
+        }
       }
     }
 
@@ -808,7 +856,7 @@ function getFrontendHTML(env) {
 
     async function queryOrders() {
       const kw = document.getElementById("query-keyword").value.trim();
-      if (!kw) return alert("请输入查询关键词");
+      if (!kw) return alert("请输入查询关键词 (手机号/邮箱/订单号)");
 
       const resBox = document.getElementById("query-results");
       resBox.innerHTML = '<div class="text-center text-slate-400 text-sm py-4">查询中...</div>';
@@ -824,16 +872,16 @@ function getFrontendHTML(env) {
                 <span class="text-indigo-400">\${o.region}</span>
               </div>
               <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
-                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">未提取/处理中</span>'}
+                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">已下单 (未提取卡密)</span>'}
               </div>
               <div class="flex justify-between items-center text-xs text-slate-500 pt-1">
                 <span>下单时间: \${o.created_at}</span>
-                \${o.status === 1 ? \`<button onclick="replaceCarmi('\${o.order_no}')" class="text-amber-400 hover:text-amber-300 font-medium"><i class="fa-solid fa-rotate"></i> 密码错误？换号</button>\` : ''}
+                \${o.status === 1 ? \`<button onclick="replaceCarmi('\${o.order_no}')" class="text-amber-400 hover:text-amber-300 font-medium"><i class="fa-solid fa-rotate"></i> 密码错误？换号</button>\` : \`<button onclick="currentOrderNo='\${o.order_no}';restoreRecentOrder();" class="text-emerald-400 hover:text-emerald-300 font-medium"><i class="fa-solid fa-key"></i> 点击去提卡</button>\`}
               </div>
             </div>
           \`).join("");
         } else {
-          resBox.innerHTML = '<div class="text-center text-slate-500 text-sm py-4">未查询到相关订单记录</div>';
+          resBox.innerHTML = '<div class="text-center text-slate-500 text-sm py-4">未查询到相关订单记录，请核对输入的手机号/邮箱</div>';
         }
       } catch (e) {
         resBox.innerHTML = '<div class="text-center text-rose-400 text-sm py-4">查询失败</div>';
