@@ -58,6 +58,7 @@ export default {
         let currentSiteName = env.SITE_NAME || "小火箭账号";
         let categoryPrices = {};
         let categoryImages = {};
+        let siteAnnouncement = "";
 
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
@@ -68,6 +69,9 @@ export default {
 
           const siteRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
           if (siteRow && siteRow.value) currentSiteName = siteRow.value;
+
+          const annRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_ANNOUNCEMENT'").first();
+          if (annRow && annRow.value) siteAnnouncement = annRow.value;
 
           const catPriceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
           if (catPriceRow && catPriceRow.value) {
@@ -84,6 +88,7 @@ export default {
           code: 0,
           data: Object.values(regionMap),
           site_name: currentSiteName,
+          announcement: siteAnnouncement,
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
           category_images: categoryImages,
@@ -178,7 +183,7 @@ export default {
       if (path === "/api/admin/approve" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -202,6 +207,9 @@ export default {
           WHERE order_no = ?
         `).bind(freshAccount.carmi, orderNo).run();
 
+        // 异步检查剩余库存是否告急 (<=3个) 并发送微信提醒
+        ctx.waitUntil(checkAndSendLowStockAlert(env, order.region));
+
         return jsonResponse({
           code: 0,
           msg: "✅ 发卡成功！买家屏幕已自动同步弹出账号和密码！",
@@ -213,7 +221,7 @@ export default {
       if (path === "/api/admin/cancel_order" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -304,7 +312,7 @@ export default {
       // 路由 5: 管理员后台 - 获取待核销订单列表与数据
       if (path === "/api/admin/orders") {
         const key = url.searchParams.get("key") || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -325,6 +333,7 @@ export default {
         let currentQrcode = "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
+        let currentAnnouncement = "";
         let pushplusToken = "";
         let categoryPrices = {};
         let categoryImages = {};
@@ -338,6 +347,9 @@ export default {
 
           const siteSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
           if (siteSetting) currentSiteName = siteSetting.value;
+
+          const annSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_ANNOUNCEMENT'").first();
+          if (annSetting && annSetting.value) currentAnnouncement = annSetting.value;
 
           const pushSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PUSHPLUS_TOKEN'").first();
           if (pushSetting) pushplusToken = pushSetting.value;
@@ -369,6 +381,7 @@ export default {
           qrcode: currentQrcode,
           price: parseFloat(currentPrice).toFixed(2),
           site_name: currentSiteName,
+          announcement: currentAnnouncement,
           pushplus_token: pushplusToken,
           category_prices: categoryPrices,
           category_images: categoryImages,
@@ -380,7 +393,7 @@ export default {
       if (path === "/api/admin/set_price" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -405,7 +418,7 @@ export default {
       if (path === "/api/admin/set_category_prices" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -426,7 +439,7 @@ export default {
       if (path === "/api/admin/set_category_image" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -466,7 +479,7 @@ export default {
       if (path === "/api/admin/generate_ai_cover" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -521,7 +534,7 @@ export default {
       if (path === "/api/admin/set_site_name" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -542,11 +555,57 @@ export default {
         }, corsHeaders);
       }
 
+      // 路由 6.6: 管理员后台 - 修改首页顶部公告栏
+      if (path === "/api/admin/set_announcement" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const text = (body.announcement || "").trim();
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('SITE_ANNOUNCEMENT', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(text).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: text ? "🎉 首页公告已更新发布！" : "已清除首页公告栏"
+        }, corsHeaders);
+      }
+
+      // 路由 6.7: 管理员后台 - 修改管理后台登录密钥
+      if (path === "/api/admin/set_admin_key" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "原管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const newKey = (body.new_key || "").trim();
+        if (!newKey || newKey.length < 4) {
+          return jsonResponse({ code: -1, msg: "新管理密钥至少需要4位字符" }, corsHeaders);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('ADMIN_KEY', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(newKey).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 管理密钥已成功修改为【${newKey}】！请务必牢记！`
+        }, corsHeaders);
+      }
+
       // 路由 6.8: 管理员后台 - 设置微信 PushPlus 推送 Token
       if (path === "/api/admin/set_pushplus" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -567,7 +626,7 @@ export default {
       if (path === "/api/admin/test_pushplus" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -629,7 +688,7 @@ export default {
       if (path === "/api/admin/clear_expired" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -649,7 +708,7 @@ export default {
       if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -674,7 +733,7 @@ export default {
       if (path === "/api/admin/import" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
+        if (!await verifyAdminKey(env, key)) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
         const lines = (body.text || "").split("\n");
@@ -753,6 +812,76 @@ export default {
     }
   }
 };
+
+/**
+ * 校验管理员密钥 (优先读取数据库自定义密钥，缺省回退环境变量与默认值)
+ */
+async function verifyAdminKey(env, key) {
+  if (!key) return false;
+  let correctKey = env.ADMIN_KEY || "51245124";
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'ADMIN_KEY'").first();
+    if (row && row.value) correctKey = row.value.trim();
+  } catch(e) {}
+  return key.trim() === correctKey;
+}
+
+/**
+ * 检查并触发库存告急微信提醒 (剩余 <= 3 个且1小时内不重复轰炸)
+ */
+async function checkAndSendLowStockAlert(env, region) {
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PUSHPLUS_TOKEN'").first();
+    if (!row || !row.value) return;
+    const token = row.value.trim();
+    if (!token) return;
+
+    const countRes = await env.DB.prepare(
+      "SELECT COUNT(*) as cnt FROM carmis WHERE (region = ? OR region = '通用') AND status = 0"
+    ).bind(region).first();
+    const count = countRes ? countRes.cnt : 0;
+
+    if (count <= 3) {
+      const alertKey = `LAST_ALERT_${region}`;
+      const lastAlert = await env.DB.prepare("SELECT value, updated_at FROM settings WHERE key = ?").bind(alertKey).first();
+      if (lastAlert && lastAlert.updated_at) {
+        let tStr = lastAlert.updated_at;
+        if (!tStr.includes("T") && !tStr.endsWith("Z") && !tStr.includes("+")) {
+          tStr = tStr.replace(" ", "T") + "+08:00";
+        }
+        const lastTime = new Date(tStr).getTime();
+        if (Date.now() - lastTime < 3600 * 1000) return; // 1小时内已提醒过则跳过
+      }
+
+      await env.DB.prepare(`
+        INSERT INTO settings (key, value, updated_at)
+        VALUES (?, '1', datetime('now', '+8 hours'))
+        ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = datetime('now', '+8 hours')
+      `).bind(alertKey).run();
+
+      await fetch("https://www.pushplus.plus/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: token,
+          title: `⚠️【库存告急】${region} 仅剩 ${count} 件！`,
+          content: `
+            <div style="font-family:sans-serif;max-width:500px;background:#fff1f2;padding:16px;border-radius:12px;border:1px solid #fecdd3;">
+              <h3 style="color:#be123c;margin-top:0;">⚠️ 商品库存不足提醒</h3>
+              <p style="color:#475569;font-size:14px;line-height:1.6;">
+                您的发卡系统商品 <b>【${region}】</b> 当前可用库存仅剩 <b style="color:#e11d48;font-size:16px;">${count}</b> 个！<br>
+                为避免买家付款后缺货，请及时登录后台补充卡密或检查自动抓取。
+              </p>
+            </div>
+          `,
+          template: "html"
+        })
+      });
+    }
+  } catch(e) {
+    console.error("库存告急推送异常:", e);
+  }
+}
 
 /**
  * 确保数据库表结构完整
@@ -1010,6 +1139,14 @@ function getFrontendHTML(env) {
       <p class="text-slate-400 text-sm">24小时极速出卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
     </div>
 
+    <!-- 顶部公告栏 / 跑马灯 -->
+    <div id="site-announcement-bar" class="hidden mb-4 p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-3 shadow-xl backdrop-blur-md">
+      <div class="w-8 h-8 rounded-xl bg-amber-500/30 text-amber-300 flex items-center justify-center shrink-0 text-sm">
+        <i class="fa-solid fa-bullhorn animate-bounce"></i>
+      </div>
+      <span id="site-announcement-text" class="flex-1 font-semibold leading-relaxed"></span>
+    </div>
+
     <!-- 顶部重要安全使用须知 (图文指引) -->
     <div class="mb-6 p-4 sm:p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-md shadow-xl relative overflow-hidden">
       <div class="absolute -right-6 -bottom-6 text-amber-500/10 text-8xl pointer-events-none">
@@ -1197,9 +1334,27 @@ function getFrontendHTML(env) {
             <span id="warranty-countdown" class="text-slate-400 font-mono flex items-center gap-1">
               <i class="fa-regular fa-clock text-indigo-400"></i> 质保剩余: 计算中...
             </span>
-            <button id="btn-replace" onclick="replaceCarmi()" class="text-amber-400 hover:text-amber-300 font-medium flex items-center gap-1">
-              <i class="fa-solid fa-rotate"></i> 密码错误？换号 (1/1)
-            </button>
+          </div>
+        </div>
+
+        <!-- 新手 3 步使用图文指引 -->
+        <div class="p-3 rounded-xl bg-slate-950/80 border border-indigo-500/30 text-xs space-y-2">
+          <div class="font-bold text-indigo-300 flex items-center gap-1.5">
+            <i class="fa-solid fa-book-open-reader"></i> 3步新手使用指南（极速上手）：
+          </div>
+          <div class="space-y-1.5 text-slate-300 text-[11px] leading-relaxed">
+            <div class="flex items-start gap-1.5">
+              <span class="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">1</span>
+              <span>打开手机 <b>App Store</b>（应用商店），点击右上角头像滑到最底部，点击<b>【退出登录】</b>。</span>
+            </div>
+            <div class="flex items-start gap-1.5">
+              <span class="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">2</span>
+              <span>点击上方<b>【复制账号】</b>与<b>【复制密码】</b>分别粘贴登录。</span>
+            </div>
+            <div class="flex items-start gap-1.5">
+              <span class="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-[10px] shrink-0 mt-0.5">3</span>
+              <span>若弹出“双重认证 / Apple ID 安全”，请选择<b>【其他选项】➔【不升级】</b>即可直接搜索下载！</span>
+            </div>
           </div>
         </div>
 
@@ -1343,6 +1498,17 @@ function getFrontendHTML(env) {
             document.title = json.site_name + " - 自动发卡网";
             var headerTitle = document.getElementById("site-header-title");
             if (headerTitle) headerTitle.innerText = json.site_name;
+          }
+          if (json.announcement) {
+            var banner = document.getElementById("site-announcement-bar");
+            var textEl = document.getElementById("site-announcement-text");
+            if (banner && textEl) {
+              textEl.innerText = json.announcement;
+              banner.classList.remove("hidden");
+            }
+          } else {
+            var banner = document.getElementById("site-announcement-bar");
+            if (banner) banner.classList.add("hidden");
           }
           renderRegions();
         }
@@ -1904,6 +2070,34 @@ function getAdminHTML(env) {
           </div>
         </div>
       </div>
+
+      <!-- 5. 设置首页顶部公告栏 / 跑马灯 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
+          <i class="fa-solid fa-bullhorn text-amber-400"></i> 首页顶部公告栏 / 跑马灯
+        </label>
+        <div class="flex gap-2">
+          <input type="text" id="announcement-input" placeholder="例如：🔥 今日刚补货50个美区账号，拍下即发！" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          <button onclick="saveAnnouncement()" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+            <i class="fa-solid fa-floppy-disk"></i> 保存公告
+          </button>
+        </div>
+        <p class="text-[10px] text-slate-500">留空则不显示公告。填写后买家前台顶部将以醒目通知卡片显示该公告。</p>
+      </div>
+
+      <!-- 6. 修改后台管理密码 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
+          <i class="fa-solid fa-key text-rose-400"></i> 修改后台管理密钥 (登录密码)
+        </label>
+        <div class="flex gap-2">
+          <input type="text" id="new-admin-key-input" placeholder="输入新的管理密码 (默认: 51245124)" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
+          <button onclick="saveAdminKey()" class="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+            <i class="fa-solid fa-shield-halved"></i> 修改密码
+          </button>
+        </div>
+        <p class="text-[10px] text-slate-500">修改后立即生效，下次登录或刷新请使用新密码。</p>
+      </div>
     </div>
 
     <!-- 批量导入卡密 (支持自定义多品类) -->
@@ -2091,6 +2285,11 @@ function getAdminHTML(env) {
           if (json.site_name) {
             var siteInput = document.getElementById("sitename-input");
             if (siteInput && !siteInput.value) siteInput.value = json.site_name;
+          }
+
+          if (json.announcement !== undefined) {
+            var annInput = document.getElementById("announcement-input");
+            if (annInput && !annInput.value) annInput.value = json.announcement || "";
           }
 
           if (json.pushplus_token) {
@@ -2621,6 +2820,52 @@ function getAdminHTML(env) {
         loadAdminData();
       } catch (e) {
         alert("保存失败");
+      }
+    }
+
+    async function saveAnnouncement() {
+      var key = document.getElementById("admin-key").value.trim();
+      var text = document.getElementById("announcement-input").value.trim();
+
+      try {
+        var res = await fetch("/api/admin/set_announcement", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, announcement: text })
+        });
+        var json = await res.json();
+        alert(json.msg || "公告已保存");
+        loadAdminData();
+      } catch (e) {
+        alert("公告保存失败");
+      }
+    }
+
+    async function saveAdminKey() {
+      var key = document.getElementById("admin-key").value.trim();
+      var newKey = document.getElementById("new-admin-key-input").value.trim();
+      if (!newKey) return alert("请输入新的管理密码");
+      if (newKey.length < 4) return alert("管理密码至少需要4位字符");
+      if (!confirm("确定要将管理密钥修改为 [" + newKey + "] 吗？修改后请务必牢记新密码！")) return;
+
+      try {
+        var res = await fetch("/api/admin/set_admin_key", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, new_key: newKey })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || "密码修改成功！");
+          document.getElementById("admin-key").value = newKey;
+          localStorage.setItem("faka_admin_key", newKey);
+          document.getElementById("new-admin-key-input").value = "";
+          loadAdminData();
+        } else {
+          alert(json.msg || "修改失败");
+        }
+      } catch (e) {
+        alert("修改失败");
       }
     }
 
