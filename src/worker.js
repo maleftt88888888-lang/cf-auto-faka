@@ -99,7 +99,7 @@ export default {
 
         await env.DB.prepare(`
           INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count)
-          VALUES (?, ?, ?, ?, 0, ?, datetime('now'), 0)
+          VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0)
         `).bind(orderNo, region, contact, price, `核销码:${checkCode}`).run();
 
         return jsonResponse({
@@ -155,11 +155,11 @@ export default {
         }
 
         if (freshAccount.id) {
-          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, freshAccount.id).run();
+          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now', '+8 hours') WHERE id = ?").bind(orderNo, freshAccount.id).run();
         }
         await env.DB.prepare(`
           UPDATE orders 
-          SET status = 1, carmi = ?, pay_type = '站长已核销', paid_at = datetime('now'), replace_count = 0
+          SET status = 1, carmi = ?, pay_type = '站长已核销', paid_at = datetime('now', '+8 hours'), replace_count = 0
           WHERE order_no = ?
         `).bind(freshAccount.carmi, orderNo).run();
 
@@ -206,7 +206,7 @@ export default {
         `).bind(freshAccount.carmi, newReplaceCount, orderNo).run();
 
         if (freshAccount.id) {
-          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, freshAccount.id).run();
+          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now', '+8 hours') WHERE id = ?").bind(orderNo, freshAccount.id).run();
         }
 
         const newOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
@@ -300,8 +300,8 @@ export default {
 
         await env.DB.prepare(`
           INSERT INTO settings (key, value, updated_at)
-          VALUES ('PRICE', ?, datetime('now'))
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+          VALUES ('PRICE', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
         `).bind(price.toFixed(2)).run();
 
         return jsonResponse({
@@ -325,8 +325,8 @@ export default {
 
         await env.DB.prepare(`
           INSERT INTO settings (key, value, updated_at)
-          VALUES ('PAY_QRCODE', ?, datetime('now'))
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+          VALUES ('PAY_QRCODE', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
         `).bind(imageData).run();
 
         return jsonResponse({
@@ -352,7 +352,7 @@ export default {
           try {
             await env.DB.prepare(`
               INSERT INTO carmis (region, account, password, carmi, status, created_at)
-              VALUES (?, ?, ?, ?, 0, datetime('now'))
+              VALUES (?, ?, ?, ?, 0, datetime('now', '+8 hours'))
             `).bind(defaultRegion, line, line, line).run();
             imported++;
           } catch (e) {}
@@ -440,7 +440,11 @@ function getOrderWarrantyInfo(order) {
   const baseTimeStr = order.paid_at || order.created_at;
   let baseTime = Date.now();
   if (baseTimeStr) {
-    const parsed = new Date(baseTimeStr.replace(" ", "T") + "Z").getTime();
+    let tStr = baseTimeStr;
+    if (!tStr.includes("T") && !tStr.endsWith("Z") && !tStr.includes("+")) {
+      tStr = tStr.replace(" ", "T") + "+08:00";
+    }
+    const parsed = new Date(tStr).getTime();
     if (!isNaN(parsed)) baseTime = parsed;
   }
 
@@ -559,7 +563,7 @@ async function syncAccountsFromSource(env) {
       try {
         const dbRes = await env.DB.prepare(`
           INSERT INTO carmis (region, account, password, carmi, status, created_at)
-          VALUES (?, ?, ?, ?, 0, datetime('now'))
+          VALUES (?, ?, ?, ?, 0, datetime('now', '+8 hours'))
         `).bind(item.region, item.account, item.password, carmi).run();
 
         if (dbRes.meta && dbRes.meta.changes > 0) inserted++;
