@@ -1766,6 +1766,60 @@ function getAdminHTML(env) {
       </div>
     </div>
 
+    <!-- 🎨 自动化生成商品海报与推广主图 (新增利器) -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+      <div class="flex justify-between items-center border-b border-slate-800 pb-2">
+        <h2 class="font-bold text-pink-400 flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> 自动生成商品宣传主图 / 朋友圈海报
+        </h2>
+        <span class="text-[11px] text-slate-500">一键生成高清发圈海报</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="space-y-1">
+          <label class="text-xs text-slate-300">商品主标题</label>
+          <input type="text" id="poster-title" value="小火箭 Shadowrocket 独享账号" placeholder="商品主标题" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+        </div>
+        <div class="space-y-1">
+          <label class="text-xs text-slate-300">标价与角标</label>
+          <div class="flex gap-2">
+            <input type="text" id="poster-price" value="￥4.99" placeholder="如 ￥4.99" class="w-1/2 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-emerald-400 font-bold">
+            <input type="text" id="poster-tag" value="官方正品 · 独享首发" placeholder="角标文案" class="w-1/2 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-indigo-300">
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="space-y-1">
+          <label class="text-xs text-slate-300">核心卖点标签 (以空格隔开)</label>
+          <input type="text" id="poster-features" value="⚡自动发货 🔒独享纯净 🛡️2小时售后 🌐全区畅享" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+        </div>
+        <div class="space-y-1">
+          <label class="text-xs text-slate-300">海报配色风格</label>
+          <select id="poster-theme" onchange="generateProductPoster()" class="w-full px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+            <option value="purple">🔮 极客霓虹紫 (Cyber Purple)</option>
+            <option value="darkgold">👑 奢华黑金 (Luxury Dark Gold)</option>
+            <option value="techblue">🌊 科技数码蓝 (Tech Blue)</option>
+            <option value="emerald">🍃 极简翡翠绿 (Clean Emerald)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="flex gap-2 pt-1">
+        <button onclick="generateProductPoster()" class="flex-1 py-2 bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-600 hover:to-indigo-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-lg">
+          <i class="fa-solid fa-paintbrush"></i> 立即渲染生成图片
+        </button>
+        <button onclick="downloadProductPoster()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-lg text-xs flex items-center justify-center gap-1 border border-slate-700">
+          <i class="fa-solid fa-download"></i> 下载图片
+        </button>
+      </div>
+
+      <!-- 海报画布预览区 -->
+      <div class="flex justify-center p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 overflow-hidden">
+        <canvas id="poster-canvas" width="750" height="750" class="max-w-full h-auto rounded-lg shadow-2xl border border-slate-700/50" style="max-height: 380px;"></canvas>
+      </div>
+    </div>
+
     <!-- 最近已出卡记录 -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
       <h2 class="font-bold text-slate-300 text-sm">最近发卡记录</h2>
@@ -2210,7 +2264,197 @@ function getAdminHTML(env) {
       }
     }
 
+    // 🎨 纯 Canvas 自动渲染生成高品质电商商品宣传海报图
+    function generateProductPoster() {
+      var canvas = document.getElementById("poster-canvas");
+      if (!canvas) return;
+      var ctx = canvas.getContext("2d");
+      var w = canvas.width, h = canvas.height;
+
+      var title = document.getElementById("poster-title").value.trim() || "小火箭 Shadowrocket 独享账号";
+      var price = document.getElementById("poster-price").value.trim() || "￥4.99";
+      var tag = document.getElementById("poster-tag").value.trim() || "官方正品 · 独享首发";
+      var feats = document.getElementById("poster-features").value.trim().split(/\s+/).filter(Boolean);
+      var theme = document.getElementById("poster-theme").value;
+
+      var c1 = "#09090b", c2 = "#1e1138", accent = "#a855f7", badgeBg = "rgba(168, 85, 247, 0.15)", glowColor = "rgba(168, 85, 247, 0.35)";
+      if (theme === "darkgold") {
+        c1 = "#0c0a09"; c2 = "#292524"; accent = "#f59e0b"; badgeBg = "rgba(245, 158, 11, 0.15)"; glowColor = "rgba(245, 158, 11, 0.35)";
+      } else if (theme === "techblue") {
+        c1 = "#030712"; c2 = "#0f172a"; accent = "#38bdf8"; badgeBg = "rgba(56, 189, 248, 0.15)"; glowColor = "rgba(56, 189, 248, 0.35)";
+      } else if (theme === "emerald") {
+        c1 = "#022c22"; c2 = "#064e3b"; accent = "#10b981"; badgeBg = "rgba(16, 185, 129, 0.15)"; glowColor = "rgba(16, 185, 129, 0.35)";
+      }
+
+      // 1. 背景渐变
+      var bgGrad = ctx.createLinearGradient(0, 0, w, h);
+      bgGrad.addColorStop(0, c1);
+      bgGrad.addColorStop(0.6, c2);
+      bgGrad.addColorStop(1, "#000000");
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // 2. 光晕特效
+      var glow1 = ctx.createRadialGradient(w * 0.85, h * 0.15, 10, w * 0.85, h * 0.15, 320);
+      glow1.addColorStop(0, glowColor);
+      glow1.addColorStop(1, "transparent");
+      ctx.fillStyle = glow1;
+      ctx.fillRect(0, 0, w, h);
+
+      var glow2 = ctx.createRadialGradient(w * 0.15, h * 0.85, 10, w * 0.15, h * 0.85, 280);
+      glow2.addColorStop(0, glowColor);
+      glow2.addColorStop(1, "transparent");
+      ctx.fillStyle = glow2;
+      ctx.fillRect(0, 0, w, h);
+
+      // 3. 中心磨砂卡片
+      var pad = 36;
+      var cardX = pad, cardY = pad, cardW = w - pad * 2, cardH = h - pad * 2;
+      ctx.save();
+      ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(cardX, cardY, cardW, cardH, 28);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // 4. 顶部标签
+      ctx.save();
+      var tagX = cardX + 36, tagY = cardY + 40;
+      ctx.fillStyle = badgeBg;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, 240, 38, 19);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = accent;
+      ctx.font = "bold 15px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("✦ " + tag, tagX + 120, tagY + 19);
+      ctx.restore();
+
+      // 5. 商品主标题
+      ctx.save();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 36px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.shadowColor = "rgba(0,0,0,0.6)";
+      ctx.shadowBlur = 12;
+      
+      var lines = title.length > 13 ? [title.slice(0, 13), title.slice(13)] : [title];
+      var titleY = cardY + 98;
+      lines.forEach(function(line, idx) {
+        ctx.fillText(line, cardX + 36, titleY + (idx * 48));
+      });
+      ctx.restore();
+
+      // 6. 卖点特性标签
+      ctx.save();
+      var featY = cardY + 215;
+      var chipW = (cardW - 72 - 16) / 2;
+      var chipH = 48;
+      feats.slice(0, 4).forEach(function(feat, idx) {
+        var col = idx % 2;
+        var row = Math.floor(idx / 2);
+        var cx = cardX + 36 + col * (chipW + 16);
+        var cy = featY + row * (chipH + 12);
+
+        ctx.fillStyle = "rgba(30, 41, 59, 0.88)";
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(cx, cy, chipW, chipH, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#f1f5f9";
+        ctx.font = "bold 15px -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(feat, cx + chipW / 2, cy + chipH / 2);
+      });
+      ctx.restore();
+
+      // 7. 价格区域 Banner
+      ctx.save();
+      var priceBoxY = cardY + 348;
+      var priceBoxH = 115;
+      var pGrad = ctx.createLinearGradient(cardX + 36, priceBoxY, cardX + cardW - 36, priceBoxY + priceBoxH);
+      pGrad.addColorStop(0, "rgba(24, 24, 27, 0.95)");
+      pGrad.addColorStop(1, "rgba(39, 39, 42, 0.95)");
+      ctx.fillStyle = pGrad;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(cardX + 36, priceBoxY, cardW - 72, priceBoxH, 20);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "14px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("限时抢购特惠价", cardX + 60, priceBoxY + 35);
+
+      ctx.fillStyle = accent;
+      ctx.font = "900 46px -apple-system, sans-serif";
+      ctx.fillText(price, cardX + 60, priceBoxY + 84);
+
+      // 右侧按钮
+      var btnW = 150, btnH = 48;
+      var btnX = cardX + cardW - 36 - 24 - btnW;
+      var btnY = priceBoxY + 34;
+      var btnGrad = ctx.createLinearGradient(btnX, btnY, btnX + btnW, btnY + btnH);
+      btnGrad.addColorStop(0, accent);
+      btnGrad.addColorStop(1, "#ec4899");
+      ctx.fillStyle = btnGrad;
+      ctx.beginPath();
+      ctx.roundRect(btnX, btnY, btnW, btnH, 24);
+      ctx.fill();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 17px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("立即抢购 ➔", btnX + btnW / 2, btnY + btnH / 2);
+      ctx.restore();
+
+      // 8. 底部发货说明与网址
+      ctx.save();
+      var footerY = cardY + cardH - 85;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+      ctx.beginPath();
+      ctx.moveTo(cardX + 36, footerY - 12);
+      ctx.lineTo(cardX + cardW - 36, footerY - 12);
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 16px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("🚀 全自动发卡平台 · 7×24小时秒级出卡", cardX + 36, footerY + 16);
+
+      ctx.fillStyle = "#64748b";
+      ctx.font = "13px font-mono, sans-serif";
+      ctx.fillText("认准官网: " + window.location.origin, cardX + 36, footerY + 44);
+      ctx.restore();
+    }
+
+    function downloadProductPoster() {
+      var canvas = document.getElementById("poster-canvas");
+      if (!canvas) return;
+      var a = document.createElement("a");
+      a.download = (document.getElementById("poster-title").value.trim() || "商品海报") + ".png";
+      a.href = canvas.toDataURL("image/png");
+      a.click();
+    }
+
     loadAdminData();
+    generateProductPoster();
     var adminPollTimer = setInterval(loadAdminData, 4000);
 
     // 智能节流：离开页面/锁屏时自动停止请求，切回页面时立即刷新并恢复
