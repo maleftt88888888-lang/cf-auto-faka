@@ -1,10 +1,10 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统
- * 支持：Cron 定时自动抓取、地区分类库存、对接汇源开放平台/聚合支付、自动发卡、订单查询
+ * Cloudflare Worker - 智能自动抓取发卡系统 (0成本个人收款码核销版)
+ * 支持：自动抓取目标站账号、多地区库存、微信赞赏码/个人收款码支付、手机端管理后台一键核销发卡
  */
 
 export default {
-  // 1. 定时任务：自动抓取目标网站并入库
+  // 1. 定时任务：自动抓取目标网站账号入库
   async scheduled(event, env, ctx) {
     console.log("⏰ 触发定时抓取任务...");
     await syncAccountsFromSource(env);
@@ -26,7 +26,7 @@ export default {
     }
 
     try {
-      // 路由 1: 获取各地区库存统计
+      // 路由 1: 获取各地区库存统计及网站配置
       if (path === "/api/stats") {
         const rows = await env.DB.prepare(`
           SELECT region, COUNT(CASE WHEN status = 0 THEN 1 END) as stock, COUNT(CASE WHEN status = 1 THEN 1 END) as sold
@@ -55,16 +55,15 @@ export default {
           data: Object.values(regionMap),
           site_name: env.SITE_NAME || "云账号智能发卡平台",
           price: env.PRICE_PER_ACCOUNT || "1.00",
-          pay_enabled: !!(env.PAY_PID && env.PAY_KEY && env.PAY_URL)
+          pay_qrcode: env.PAY_QRCODE_URL || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300" // 收款码图片
         }, corsHeaders);
       }
 
-      // 路由 2: 创建订单（支持免支付测试 & 汇源支付对接）
+      // 路由 2: 买家创建订单（生成专属4位核销码）
       if (path === "/api/order/create" && request.method === "POST") {
         const body = await request.json();
         const region = body.region || "美国";
         const contact = (body.contact || "").trim();
-        const payType = body.pay_type || "alipay"; // alipay 或 wxpay
 
         // 检查库存
         const countRes = await env.DB.prepare(
@@ -72,143 +71,113 @@ export default {
         ).bind(region).first();
 
         if (!countRes || countRes.cnt <= 0) {
-          return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后重试！` }, corsHeaders);
+          return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后再试或联系站长补货！` }, corsHeaders);
         }
 
-        const orderNo = "FK" + Date.now() + Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+        // 生成唯一订单号及简短 4 位核销码（方便买家在微信付款时备注）
+        const checkCode = Math.floor(1000 + Math.random() * 9000).toString();
+        const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
         const price = parseFloat(env.PRICE_PER_ACCOUNT || "1.00");
 
-        // 判断是否开启了真实支付（汇源开放平台）
-        const isLivePay = !!(env.PAY_PID && env.PAY_KEY && env.PAY_URL);
-
-        if (!isLivePay) {
-          // 未配置支付秘钥时：走直接出卡模式（测试体验）
-          const carmiRecord = await env.DB.prepare(
-            "SELECT id, region, account, password, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
-          ).bind(region).first();
-
-          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
-          await env.DB.prepare(`
-            INSERT INTO orders (order_no, region, contact, price, status, carmi, pay_type, created_at, paid_at)
-            VALUES (?, ?, ?, ?, 1, ?, 'free', datetime('now'), datetime('now'))
-          `).bind(orderNo, region, contact, price, carmiRecord.carmi).run();
-
-          return jsonResponse({
-            code: 0,
-            msg: "发卡成功",
-            data: {
-              order_no: orderNo,
-              is_paid: true,
-              carmi: carmiRecord.carmi
-            }
-          }, corsHeaders);
-        }
-
-        // 开启了汇源支付：创建待支付订单并生成支付网关链接
+        // 插入待付款/待核销订单 (status = 0)
         await env.DB.prepare(`
           INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at)
           VALUES (?, ?, ?, ?, 0, ?, datetime('now'))
-        `).bind(orderNo, region, contact, price, payType).run();
-
-        const notifyUrl = `${url.origin}/api/pay/notify`;
-        const returnUrl = `${url.origin}/?order_no=${orderNo}`;
-
-        // 汇源 / 标准易支付签名参数
-        const payParams = {
-          pid: env.PAY_PID,
-          type: payType,
-          out_trade_no: orderNo,
-          notify_url: notifyUrl,
-          return_url: returnUrl,
-          name: `${region}账号卡密`,
-          money: price.toFixed(2),
-        };
-
-        const sign = await generateMD5Sign(payParams, env.PAY_KEY);
-        payParams.sign = sign;
-        payParams.sign_type = "MD5";
-
-        const queryString = new URLSearchParams(payParams).toString();
-        const paySubmitUrl = `${env.PAY_URL}?${queryString}`;
+        `).bind(orderNo, region, contact, price, `核销码:${checkCode}`).run();
 
         return jsonResponse({
           code: 0,
           msg: "订单创建成功",
           data: {
             order_no: orderNo,
-            is_paid: false,
-            pay_url: paySubmitUrl
+            check_code: checkCode,
+            price: price.toFixed(2),
+            region: region
           }
         }, corsHeaders);
       }
 
-      // 路由 3: 汇源支付异步回调通知 (Webhook)
-      if (path === "/api/pay/notify") {
-        let params = {};
-        if (request.method === "POST") {
-          const formData = await request.formData();
-          for (const [k, v] of formData.entries()) params[k] = v;
-        } else {
-          url.searchParams.forEach((v, k) => { params[k] = v; });
-        }
+      // 路由 3: 轮询检查订单状态（买家付款后页面自动查询出卡）
+      if (path === "/api/order/check") {
+        const orderNo = url.searchParams.get("order_no");
+        if (!orderNo) return jsonResponse({ code: -1, msg: "缺少订单号" }, corsHeaders);
 
-        const orderNo = params.out_trade_no;
-        const tradeStatus = params.trade_status;
-        const sign = params.sign;
-
-        // 验证签名
-        const expectedSign = await generateMD5Sign(params, env.PAY_KEY);
-        if (sign !== expectedSign) {
-          return new Response("fail: sign error", { status: 400 });
-        }
-
-        if (tradeStatus === "TRADE_SUCCESS") {
-          // 查询该订单是否已处理
-          const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
-          if (order && order.status === 0) {
-            // 从对应地区提取一张卡密
-            const carmiRecord = await env.DB.prepare(
-              "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
-            ).bind(order.region).first();
-
-            const finalCarmi = carmiRecord ? carmiRecord.carmi : "【库存告急】请联系平台客服补发！";
-
-            if (carmiRecord) {
-              await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
-            }
-
-            // 更新订单为已支付并写入卡密
-            await env.DB.prepare(
-              "UPDATE orders SET status = 1, carmi = ?, paid_at = datetime('now') WHERE order_no = ?"
-            ).bind(finalCarmi, orderNo).run();
-          }
-          return new Response("success");
-        }
-
-        return new Response("fail");
-      }
-
-      // 路由 4: 订单查询接口
-      if (path === "/api/order/query") {
-        const queryVal = (url.searchParams.get("keyword") || "").trim();
-        if (!queryVal) {
-          return jsonResponse({ code: -1, msg: "请输入订单号或联系方式查询" }, corsHeaders);
-        }
-
-        const orders = await env.DB.prepare(`
-          SELECT order_no, region, contact, price, status, carmi, created_at, paid_at
-          FROM orders
-          WHERE order_no = ? OR contact = ?
-          ORDER BY id DESC LIMIT 10
-        `).bind(queryVal, queryVal).all();
+        const order = await env.DB.prepare("SELECT order_no, status, carmi, region FROM orders WHERE order_no = ?").bind(orderNo).first();
+        if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
 
         return jsonResponse({
           code: 0,
-          data: orders.results || []
+          status: order.status, // 0=待核销, 1=已发卡
+          carmi: order.carmi || "",
+          region: order.region
         }, corsHeaders);
       }
 
-      // 路由 5: 管理员一键手动抓取同步
+      // 路由 4: 管理员后台 - 获取待核销订单列表与所有数据
+      if (path === "/api/admin/orders") {
+        const key = url.searchParams.get("key") || "";
+        if (key !== (env.ADMIN_KEY || "admin123456")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const pendingOrders = await env.DB.prepare(`
+          SELECT id, order_no, region, contact, price, status, pay_type, created_at
+          FROM orders
+          WHERE status = 0
+          ORDER BY id DESC LIMIT 50
+        `).all();
+
+        const recentPaid = await env.DB.prepare(`
+          SELECT id, order_no, region, contact, price, status, carmi, paid_at
+          FROM orders
+          WHERE status = 1
+          ORDER BY id DESC LIMIT 15
+        `).all();
+
+        return jsonResponse({
+          code: 0,
+          pending: pendingOrders.results || [],
+          recent: recentPaid.results || []
+        }, corsHeaders);
+      }
+
+      // 路由 5: 管理员后台 - 一键核销并发卡
+      if (path === "/api/admin/approve" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "admin123456")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const orderNo = body.order_no;
+        const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 0").bind(orderNo).first();
+        if (!order) {
+          return jsonResponse({ code: -1, msg: "订单不存在或已被核销" }, corsHeaders);
+        }
+
+        // 从对应地区库存取出一张卡密
+        const carmiRecord = await env.DB.prepare(
+          "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
+        ).bind(order.region).first();
+
+        if (!carmiRecord) {
+          return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密，请先抓取同步！` }, corsHeaders);
+        }
+
+        // 标记卡密已售
+        await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
+
+        // 标记订单已完成
+        await env.DB.prepare("UPDATE orders SET status = 1, carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(carmiRecord.carmi, orderNo).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "核销成功，已自动为买家出卡！",
+          carmi: carmiRecord.carmi
+        }, corsHeaders);
+      }
+
+      // 路由 6: 管理员一键手动抓取同步
       if (path === "/api/admin/sync") {
         const key = url.searchParams.get("key") || "";
         if (key !== (env.ADMIN_KEY || "admin123456")) {
@@ -222,7 +191,29 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 6: 首页渲染前端页面
+      // 路由 7: 历史订单查询
+      if (path === "/api/order/query") {
+        const queryVal = (url.searchParams.get("keyword") || "").trim();
+        if (!queryVal) return jsonResponse({ code: -1, msg: "请输入订单号或联系方式" }, corsHeaders);
+
+        const orders = await env.DB.prepare(`
+          SELECT order_no, region, contact, price, status, carmi, created_at, paid_at
+          FROM orders
+          WHERE order_no = ? OR contact = ?
+          ORDER BY id DESC LIMIT 10
+        `).bind(queryVal, queryVal).all();
+
+        return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
+      }
+
+      // 路由 8: 管理员控制台页面 (/admin)
+      if (path === "/admin") {
+        return new Response(getAdminHTML(env), {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+      }
+
+      // 路由 9: 买家前台首页
       if (path === "/" || path === "/index.html") {
         return new Response(getFrontendHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -232,27 +223,14 @@ export default {
       return new Response("Not Found", { status: 404 });
 
     } catch (err) {
-      console.error("系统错误:", err);
+      console.error("系统异常:", err);
       return jsonResponse({ code: 500, msg: "服务器异常: " + err.message }, corsHeaders, 500);
     }
   }
 };
 
 /**
- * MD5 签名生成（适配汇源开放平台/标准易支付）
- */
-async function generateMD5Sign(params, key) {
-  const keys = Object.keys(params).filter(k => k !== "sign" && k !== "sign_type" && params[k] !== "" && params[k] !== undefined).sort();
-  const signStr = keys.map(k => `${k}=${params[k]}`).join("&") + key;
-  
-  const msgUint8 = new TextEncoder().encode(signStr);
-  const hashBuffer = await crypto.subtle.digest("MD5", msgUint8);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * 核心抓取与解析逻辑
+ * 抓取与解析逻辑
  */
 async function syncAccountsFromSource(env) {
   const targetUrl = env.TARGET_URL || "https://haogd.top/share/app";
@@ -268,7 +246,6 @@ async function syncAccountsFromSource(env) {
     });
 
     const html = await res.text();
-
     const accountPattern = /(?:账号地区[：:]\s*([^\s\r\n<]+))?[\s\S]*?(?:账号[：:]\s*([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+))[\s\S]*?(?:密码[：:]\s*([^\s\r\n<]+))/gi;
     const fallbackPattern = /([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\s+([a-zA-Z0-9!@#$%^&*()_+=\-`~]{6,30})/gi;
 
@@ -279,9 +256,7 @@ async function syncAccountsFromSource(env) {
       const region = (match[1] || "通用").replace(/[^\u4e00-\u9fa5a-zA-Z]/g, "").trim() || "通用";
       const account = match[2].trim();
       const password = match[3].trim();
-      if (account && password) {
-        accounts.push({ region, account, password });
-      }
+      if (account && password) accounts.push({ region, account, password });
     }
 
     if (accounts.length === 0) {
@@ -302,12 +277,8 @@ async function syncAccountsFromSource(env) {
           VALUES (?, ?, ?, ?, 0, datetime('now'))
         `).bind(item.region, item.account, item.password, carmi).run();
 
-        if (res.meta && res.meta.changes > 0) {
-          inserted++;
-        }
-      } catch (dbErr) {
-        // 忽略重复卡密
-      }
+        if (res.meta && res.meta.changes > 0) inserted++;
+      } catch (dbErr) {}
     }
     console.log(`✅ 抓取同步成功: 共解析 ${total} 条，成功新增入库 ${inserted} 条`);
   } catch (err) {
@@ -320,18 +291,16 @@ async function syncAccountsFromSource(env) {
 function jsonResponse(data, headers = {}, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      ...headers
-    }
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers }
   });
 }
 
 /**
- * 现代化前端发卡页面
+ * 买家前台页面
  */
 function getFrontendHTML(env) {
   const siteName = env.SITE_NAME || "云账号智能发卡平台";
+  const payQrcode = env.PAY_QRCODE_URL || "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=请在CF后台设置PAY_QRCODE_URL填入您的微信赞赏码";
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -354,7 +323,7 @@ function getFrontendHTML(env) {
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
       <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
-      <p class="text-slate-400 text-sm">24小时全自动发卡 · 实时抓取同步 · 付款秒出号</p>
+      <p class="text-slate-400 text-sm">24小时自动发卡 · 实时抓取同步 · 微信扫码即出号</p>
     </div>
 
     <!-- 主卡片 -->
@@ -382,28 +351,13 @@ function getFrontendHTML(env) {
           <input type="text" id="contact" placeholder="填写您的邮箱或手机号" class="w-full px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
         </div>
 
-        <!-- 支付方式选择 -->
-        <div id="pay-type-container">
-          <label class="block text-sm font-medium text-slate-300 mb-2">选择支付方式：</label>
-          <div class="grid grid-cols-2 gap-3">
-            <label class="p-3.5 rounded-xl border border-indigo-500 bg-indigo-500/10 flex items-center gap-3 cursor-pointer">
-              <input type="radio" name="pay_type" value="alipay" checked class="text-indigo-600 focus:ring-indigo-500">
-              <span class="text-sm font-medium text-white flex items-center gap-2"><i class="fa-brands fa-alipay text-blue-400 text-lg"></i> 支付宝</span>
-            </label>
-            <label class="p-3.5 rounded-xl border border-slate-700 bg-slate-800/50 flex items-center gap-3 cursor-pointer">
-              <input type="radio" name="pay_type" value="wxpay" class="text-indigo-600 focus:ring-indigo-500">
-              <span class="text-sm font-medium text-white flex items-center gap-2"><i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> 微信支付</span>
-            </label>
-          </div>
-        </div>
-
         <div class="pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div>
-            <span class="text-sm text-slate-400">支付金额：</span>
+            <span class="text-sm text-slate-400">应付金额：</span>
             <span class="text-2xl font-bold text-indigo-400" id="display-price">￥1.00</span>
           </div>
           <button onclick="submitOrder()" id="btn-submit" class="w-full sm:w-auto px-8 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/25 transition duration-200 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-bolt"></i> 立即下单付款
+            <i class="fa-solid fa-qrcode"></i> 立即扫码付款出卡
           </button>
         </div>
       </div>
@@ -423,9 +377,38 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
-    <!-- 弹窗：发卡结果 -->
-    <div id="modal-result" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden flex items-center justify-center p-4 z-50">
-      <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-indigo-500/30">
+    <!-- 弹窗 1：扫码付款弹窗 -->
+    <div id="modal-pay" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
+      <div class="glass max-w-sm w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40 text-center">
+        <h3 class="text-lg font-bold text-white flex items-center justify-center gap-2">
+          <i class="fa-brands fa-weixin text-emerald-400 text-xl"></i> 微信扫码付款
+        </h3>
+        
+        <div class="p-2 bg-white rounded-xl inline-block shadow-inner mx-auto">
+          <img id="pay-qr-img" src="${payQrcode}" alt="微信收款码" class="w-48 h-48 rounded-lg object-contain mx-auto">
+        </div>
+
+        <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-left space-y-1">
+          <div class="text-xs text-amber-300 font-medium">⚠️ 付款关键步骤：</div>
+          <div class="text-xs text-slate-300 leading-relaxed">
+            1. 扫码支付金额：<span class="text-emerald-400 font-bold" id="pay-money">￥1.00</span><br>
+            2. 微信付款备注填写：<span class="text-xl font-black text-amber-400 font-mono select-all" id="pay-check-code">8888</span>
+          </div>
+        </div>
+
+        <div class="text-xs text-slate-400 flex items-center justify-center gap-2">
+          <i class="fa-solid fa-spinner fa-spin text-indigo-400"></i> 付款后正在自动检测出卡中...
+        </div>
+
+        <button onclick="cancelPay()" class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl text-sm transition">
+          取消 / 返回
+        </button>
+      </div>
+    </div>
+
+    <!-- 弹窗 2：发卡成功结果 -->
+    <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
+      <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40">
         <div class="text-center">
           <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-3 border border-emerald-500/30">
             <i class="fa-solid fa-check text-xl"></i>
@@ -446,7 +429,7 @@ function getFrontendHTML(env) {
             <i class="fa-solid fa-copy"></i> 一键复制卡密
           </button>
           <button onclick="closeModal()" class="px-5 py-3 bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium rounded-xl transition">
-            关闭
+            完成
           </button>
         </div>
       </div>
@@ -454,13 +437,15 @@ function getFrontendHTML(env) {
 
     <div class="text-center text-xs text-slate-500 space-y-2">
       <p>⚠️ 提示：账号仅供在 App Store 登录下载应用，切勿在系统设置中登录 iCloud！</p>
-      <p>Powered by Cloudflare Workers & D1 Database</p>
+      <p><a href="/admin" class="hover:text-indigo-400">管理后台</a> · Powered by Cloudflare Workers & D1</p>
     </div>
   </div>
 
   <script>
     let currentSelectedRegion = "美国";
     let loadedRegions = [];
+    let currentOrderNo = null;
+    let pollTimer = null;
 
     async function loadStats() {
       try {
@@ -469,6 +454,7 @@ function getFrontendHTML(env) {
         if (json.code === 0) {
           loadedRegions = json.data;
           document.getElementById("display-price").innerText = "￥" + json.price;
+          if (json.pay_qrcode) document.getElementById("pay-qr-img").src = json.pay_qrcode;
           renderRegions();
         }
       } catch (e) {
@@ -506,38 +492,59 @@ function getFrontendHTML(env) {
 
     async function submitOrder() {
       const contact = document.getElementById("contact").value.trim();
-      const payType = document.querySelector('input[name="pay_type"]:checked').value;
       const btn = document.getElementById("btn-submit");
       btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 处理中...';
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在生成支付核销单...';
 
       try {
         const res = await fetch("/api/order/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ region: currentSelectedRegion, contact: contact, pay_type: payType })
+          body: JSON.stringify({ region: currentSelectedRegion, contact: contact })
         });
         const data = await res.json();
         if (data.code === 0) {
-          if (data.data.pay_url) {
-            // 跳转到汇源支付收银台
-            window.location.href = data.data.pay_url;
-          } else if (data.data.is_paid) {
-            // 直接出卡展示
-            document.getElementById("res-order-no").innerText = data.data.order_no;
-            document.getElementById("res-carmi").innerText = data.data.carmi;
-            document.getElementById("modal-result").classList.remove("hidden");
-            loadStats();
-          }
+          currentOrderNo = data.data.order_no;
+          document.getElementById("pay-money").innerText = "￥" + data.data.price;
+          document.getElementById("pay-check-code").innerText = data.data.check_code;
+          document.getElementById("modal-pay").classList.remove("hidden");
+
+          // 开始轮询检查订单是否核销
+          startPolling();
         } else {
           alert(data.msg || "创建订单失败");
         }
       } catch (err) {
-        alert("请求异常，请稍后重试");
+        alert("网络异常，请重试");
       } finally {
         btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> 立即下单付款';
+        btn.innerHTML = '<i class="fa-solid fa-qrcode"></i> 立即扫码付款出卡';
       }
+    }
+
+    function startPolling() {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        if (!currentOrderNo) return;
+        try {
+          const res = await fetch("/api/order/check?order_no=" + currentOrderNo);
+          const json = await res.json();
+          if (json.code === 0 && json.status === 1) {
+            // 已出卡！
+            clearInterval(pollTimer);
+            document.getElementById("modal-pay").classList.add("hidden");
+            document.getElementById("res-order-no").innerText = currentOrderNo;
+            document.getElementById("res-carmi").innerText = json.carmi;
+            document.getElementById("modal-result").classList.remove("hidden");
+            loadStats();
+          }
+        } catch (e) {}
+      }, 2500);
+    }
+
+    function cancelPay() {
+      clearInterval(pollTimer);
+      document.getElementById("modal-pay").classList.add("hidden");
     }
 
     async function queryOrders() {
@@ -558,7 +565,7 @@ function getFrontendHTML(env) {
                 <span class="text-indigo-400">\${o.region}</span>
               </div>
               <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
-                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">待支付/处理中</span>'}
+                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">待核销付款中</span>'}
               </div>
               <div class="text-xs text-slate-500">下单时间: \${o.created_at}</div>
             </div>
@@ -568,17 +575,6 @@ function getFrontendHTML(env) {
         }
       } catch (e) {
         resBox.innerHTML = '<div class="text-center text-rose-400 text-sm py-4">查询失败</div>';
-      }
-    }
-
-    // 检查 URL 是否带 order_no 跳转回来查单
-    function checkUrlOrder() {
-      const params = new URLSearchParams(window.location.search);
-      const orderNo = params.get("order_no");
-      if (orderNo) {
-        switchTab('query');
-        document.getElementById("query-keyword").value = orderNo;
-        queryOrders();
       }
     }
 
@@ -606,7 +602,139 @@ function getFrontendHTML(env) {
     }
 
     loadStats();
-    checkUrlOrder();
+  </script>
+</body>
+</html>`;
+}
+
+/**
+ * 站长手机端管理后台页面 (/admin)
+ */
+function getAdminHTML(env) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>发卡网管理后台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <style>body { background: #0f172a; color: #f8fafc; font-family: sans-serif; }</style>
+</head>
+<body class="p-4 max-w-2xl mx-auto">
+  <div class="mb-6 flex justify-between items-center border-b border-slate-800 pb-4">
+    <h1 class="text-xl font-bold flex items-center gap-2 text-indigo-400">
+      <i class="fa-solid fa-shield-halved"></i> 站长核销与库存管理
+    </h1>
+    <a href="/" class="text-xs text-slate-400 hover:text-white">返回首页</a>
+  </div>
+
+  <div class="space-y-4">
+    <!-- 管理秘钥输入 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 flex gap-2">
+      <input type="password" id="admin-key" placeholder="输入管理员密钥 (默认: admin123456)" value="admin123456" class="flex-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white">
+      <button onclick="loadAdminData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">刷新</button>
+      <button onclick="syncNow()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium flex items-center gap-1">
+        <i class="fa-solid fa-rotate"></i> 抓取同步
+      </button>
+    </div>
+
+    <!-- 待核销订单列表 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-bell"></i> 待核销订单（买家扫码付款后点击发卡）
+      </h2>
+      <div id="pending-list" class="space-y-2">
+        <div class="text-slate-500 text-xs py-2 text-center">点击刷新加载数据</div>
+      </div>
+    </div>
+
+    <!-- 最近已出卡记录 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-bold text-slate-300 text-sm">最近已发卡记录</h2>
+      <div id="recent-list" class="space-y-2"></div>
+    </div>
+  </div>
+
+  <script>
+    async function loadAdminData() {
+      const key = document.getElementById("admin-key").value.trim();
+      const pBox = document.getElementById("pending-list");
+      const rBox = document.getElementById("recent-list");
+      pBox.innerHTML = '<div class="text-xs text-slate-400 text-center py-2">加载中...</div>';
+
+      try {
+        const res = await fetch("/api/admin/orders?key=" + encodeURIComponent(key));
+        const json = await res.json();
+        if (json.code === 0) {
+          if (json.pending.length === 0) {
+            pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-2">暂无待核销订单</div>';
+          } else {
+            pBox.innerHTML = json.pending.map(o => \`
+              <div class="p-3 rounded-lg bg-slate-800 border border-slate-700 flex justify-between items-center gap-2">
+                <div class="text-xs space-y-1">
+                  <div class="font-mono text-white font-bold">\${o.order_no} | <span class="text-indigo-400">\${o.region}</span></div>
+                  <div class="text-amber-400 font-bold">\${o.pay_type} | 金额: ￥\${o.price}</div>
+                  <div class="text-slate-500">\${o.created_at}</div>
+                </div>
+                <button onclick="approveOrder('\${o.order_no}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs shadow-lg flex items-center gap-1">
+                  <i class="fa-solid fa-check"></i> 确认发卡
+                </button>
+              </div>
+            \`).join("");
+          }
+
+          rBox.innerHTML = json.recent.map(o => \`
+            <div class="p-2.5 rounded-lg bg-slate-800/60 text-xs border border-slate-700/60 space-y-1">
+              <div class="flex justify-between text-slate-400">
+                <span>\${o.order_no} (\${o.region})</span>
+                <span class="text-emerald-400 font-mono">\${o.paid_at}</span>
+              </div>
+              <div class="text-slate-300 font-mono select-all break-all">\${o.carmi}</div>
+            </div>
+          \`).join("");
+        } else {
+          alert(json.msg || "密钥错误");
+        }
+      } catch (e) {
+        alert("请求失败");
+      }
+    }
+
+    async function approveOrder(orderNo) {
+      const key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确认已收到该笔微信款项并为买家出卡？")) return;
+
+      try {
+        const res = await fetch("/api/admin/approve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, order_no: orderNo })
+        });
+        const json = await res.json();
+        if (json.code === 0) {
+          alert("✅ 发卡成功！买家端已自动同步显示卡密。");
+          loadAdminData();
+        } else {
+          alert(json.msg || "核销失败");
+        }
+      } catch (e) {
+        alert("网络错误");
+      }
+    }
+
+    async function syncNow() {
+      const key = document.getElementById("admin-key").value.trim();
+      try {
+        const res = await fetch("/api/admin/sync?key=" + encodeURIComponent(key));
+        const json = await res.json();
+        alert(json.msg);
+      } catch (e) {
+        alert("同步请求失败");
+      }
+    }
+
+    loadAdminData();
   </script>
 </body>
 </html>`;
