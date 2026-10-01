@@ -279,6 +279,20 @@ export default {
         }, corsHeaders);
       }
 
+      // 路由 8.1: 管理员后台 - 一键手动触发抓取
+      if (path === "/api/admin/sync") {
+        const key = url.searchParams.get("key") || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+        const result = await syncAccountsFromSource(env);
+        return jsonResponse({
+          code: 0,
+          msg: result.error ? `同步失败: ${result.error}` : `同步完成！本次新增入库 ${result.inserted} 条卡密，总解析到 ${result.total} 条账号。`,
+          data: result
+        }, corsHeaders);
+      }
+
       // 路由 9: 历史订单查询
       if (path === "/api/order/query") {
         const queryVal = (url.searchParams.get("keyword") || "").trim();
@@ -316,6 +330,76 @@ export default {
     }
   }
 };
+
+/**
+ * 核心抓取与解析逻辑 (适配 haoged.top/share/app)
+ */
+async function syncAccountsFromSource(env) {
+  const targetUrl = env.TARGET_URL || "https://haoged.top/share/app";
+  let inserted = 0;
+  let total = 0;
+
+  try {
+    const res = await fetch(targetUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      }
+    });
+
+    if (!res.ok) {
+      return { total: 0, inserted: 0, error: `源站响应 HTTP ${res.status}: ${res.statusText}` };
+    }
+
+    const html = await res.text();
+    const cards = html.split('card-body');
+    const accounts = [];
+
+    for (const card of cards.slice(1)) {
+      const clips = card.match(/data-clipboard-text=["']([^"']+)["']/g) || [];
+      let account = "";
+      let password = "";
+      for (const raw of clips) {
+        const val = raw.replace(/data-clipboard-text=["']/, '').replace(/["']$/, '').trim();
+        if (val.includes("@")) {
+          account = val;
+        } else if (!password && val.length >= 4) {
+          password = val;
+        }
+      }
+
+      let reg = "美国";
+      for (const r of ["香港", "台湾", "日本", "美国", "韩国", "新加坡", "英国"]) {
+        if (card.includes(r)) {
+          reg = r;
+          break;
+        }
+      }
+
+      if (account && password) {
+        accounts.push({ region: reg, account, password });
+      }
+    }
+
+    total = accounts.length;
+
+    for (const item of accounts) {
+      const carmi = `【${item.region}】账号: ${item.account} ---- 密码: ${item.password}`;
+      try {
+        const dbRes = await env.DB.prepare(`
+          INSERT INTO carmis (region, account, password, carmi, status, created_at)
+          VALUES (?, ?, ?, ?, 0, datetime('now'))
+        `).bind(item.region, item.account, item.password, carmi).run();
+
+        if (dbRes.meta && dbRes.meta.changes > 0) inserted++;
+      } catch (dbErr) {}
+    }
+
+    return { total, inserted };
+  } catch (err) {
+    return { total: 0, inserted: 0, error: err.message };
+  }
+}
 
 function jsonResponse(data, headers = {}, status = 200) {
   return new Response(JSON.stringify(data), {

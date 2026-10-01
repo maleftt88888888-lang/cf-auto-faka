@@ -2,9 +2,9 @@ name: 🔄 自动定时抓取同步卡密到 Cloudflare
 
 on:
   schedule:
-    # 每 2 小时自动运行一次 (UTC 时间每2小时的第0分)
+    # 每 2 小时自动运行一次
     - cron: '0 */2 * * *'
-  workflow_dispatch: # 支持在 GitHub 网页上手动点击立即运行
+  workflow_dispatch: # 支持在 GitHub 网页上手动一键立即运行
 
 jobs:
   sync:
@@ -21,11 +21,11 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests urllib3
 
       - name: 运行自动抓取与同步
         env:
-          TARGET_URL: 'https://haogd.top/share/app'
+          TARGET_URL: 'https://haoged.top/share/app'
           ONLINE_FAKA_URL: 'https://cf-auto-faka.maleftt88888888.workers.dev'
           ADMIN_KEY: '51245124'
         run: |

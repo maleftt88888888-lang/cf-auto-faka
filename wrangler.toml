@@ -12,9 +12,9 @@ binding = "DB"
 database_name = "faka-db"
 database_id = "3ad9ee3f-166f-4446-9a00-b39c8fcb2ecf"
 
-# 环境变量配置 (已自动同步你的自定义设置)
+# 环境变量配置
 [vars]
 SITE_NAME = "小火箭账号"
 ADMIN_KEY = "51245124"
 PRICE_PER_ACCOUNT = "4.99"
-TARGET_URL = "https://haogd.top/share/app"
+TARGET_URL = "https://haoged.top/share/app"
