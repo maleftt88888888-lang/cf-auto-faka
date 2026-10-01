@@ -113,7 +113,36 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 3: 买家凭微信账单单号自助提取卡密 (提卡时实时穿透抓取原网页最新账号)
+      // 路由 2.5: PC 微信 / 天翼云电脑 自动到账通知接口
+      if (path === "/api/pay/notify" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || body.secret || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "通信密钥错误" }, corsHeaders, 403);
+        }
+
+        const tradeNo = (body.trade_no || "").trim();
+        const amount = parseFloat(body.amount || "0");
+        const raw = body.raw || "";
+
+        if (!tradeNo) {
+          return jsonResponse({ code: -1, msg: "缺少交易单号" }, corsHeaders);
+        }
+
+        try {
+          await env.DB.prepare(`
+            INSERT INTO payments (trade_no, amount, status, raw_message, created_at)
+            VALUES (?, ?, 0, ?, datetime('now'))
+          `).bind(tradeNo, amount, raw).run();
+
+          console.log(`💰 成功接收天翼云电脑微信真实到账推送: 单号 ${tradeNo}, 金额 ￥${amount}`);
+          return jsonResponse({ code: 0, msg: "真实到账记录已成功入库！" }, corsHeaders);
+        } catch (e) {
+          return jsonResponse({ code: 0, msg: "该单号已记录过" }, corsHeaders);
+        }
+      }
+
+      // 路由 3: 买家凭微信账单单号自助提取卡密 (严格校验天翼云电脑微信到账池)
       if (path === "/api/order/claim" && request.method === "POST") {
         const body = await request.json();
         const orderNo = (body.order_no || "").trim();
@@ -137,13 +166,30 @@ export default {
           }, corsHeaders);
         }
 
-        const usedCheck = await env.DB.prepare("SELECT id FROM orders WHERE pay_type = ? AND id != ?").bind(`微信单号:${tradeNo}`, order.id).first();
+        // 防同一单号重复使用
+        const usedCheck = await env.DB.prepare("SELECT id FROM orders WHERE pay_type LIKE ? AND id != ?").bind(`%${tradeNo}%`, order.id).first();
         if (usedCheck) {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        // 🌟 方案4：用户提卡时实时穿透请求原网页抓取最新账号
-        console.log(`⚡ 用户提卡中 (订单 ${orderNo}, 地区 ${order.region})，正在实时从原网页获取最新账号...`);
+        // 🌟 核心防白嫖真实验资：比对天翼云电脑推送的 payments 真实到账池
+        let paymentRecord = await env.DB.prepare(
+          "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
+        ).bind(`%${tradeNo}`, tradeNo).first();
+
+        // 如果未匹配到真实到账记录：直接拦截拒绝！
+        if (!paymentRecord) {
+          return jsonResponse({
+            code: -1,
+            msg: "❌ 未匹配到该单号的微信真实到账记录！\n请确认您已成功扫码付款并准确输入单号后4位（如刚付款请等待几秒同步）。"
+          }, corsHeaders);
+        }
+
+        // 标记该笔到账已被核销使用
+        await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
+
+        // 实时穿透请求原网页抓取最新账号
+        console.log(`⚡ 真实验资通过 (订单 ${orderNo}, 微信真实单号 ${paymentRecord.trade_no})，正在实时从原网页获取最新账号...`);
         const freshAccount = await fetchLatestLiveAccount(env, order.region);
 
         if (!freshAccount || !freshAccount.carmi) {
@@ -157,14 +203,14 @@ export default {
           UPDATE orders 
           SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now'), replace_count = 0
           WHERE order_no = ?
-        `).bind(freshAccount.carmi, `微信单号:${tradeNo}`, orderNo).run();
+        `).bind(freshAccount.carmi, `微信单号:${paymentRecord.trade_no}`, orderNo).run();
 
         const updatedOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         const warranty = getOrderWarrantyInfo(updatedOrder);
 
         return jsonResponse({
           code: 0,
-          msg: "🎉 验证成功！已为您实时获取原网站最新可用账号！",
+          msg: "🎉 微信真实到账核验成功！已为您实时获取原网站最新可用账号！",
           data: {
             order_no: orderNo,
             carmi: freshAccount.carmi,
@@ -441,11 +487,26 @@ export default {
 };
 
 /**
- * 确保数据库表结构完整
+ * 确保数据库表结构完整 (orders表扩展 + payments真实到账池表)
  */
 async function ensureDbMigrated(env) {
   try {
     await env.DB.prepare("ALTER TABLE orders ADD COLUMN replace_count INTEGER DEFAULT 0").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_no TEXT UNIQUE NOT NULL,
+        amount REAL NOT NULL DEFAULT 0.0,
+        status INTEGER DEFAULT 0,
+        order_no TEXT DEFAULT NULL,
+        raw_message TEXT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        used_at DATETIME DEFAULT NULL
+      )
+    `).run();
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_payments_trade_no ON payments(trade_no)").run();
   } catch (e) {}
 }
 
