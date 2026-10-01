@@ -59,6 +59,7 @@ export default {
         let categoryPrices = {};
         let categoryImages = {};
         let siteAnnouncement = "";
+        let contactInfo = { wechat: "", wechat_qr: "", telegram: "", qq: "", custom_tip: "" };
 
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
@@ -72,6 +73,11 @@ export default {
 
           const annRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_ANNOUNCEMENT'").first();
           if (annRow && annRow.value) siteAnnouncement = annRow.value;
+
+          const contactRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CONTACT_INFO'").first();
+          if (contactRow && contactRow.value) {
+            try { contactInfo = JSON.parse(contactRow.value); } catch(e) {}
+          }
 
           const catPriceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
           if (catPriceRow && catPriceRow.value) {
@@ -89,10 +95,50 @@ export default {
           data: Object.values(regionMap),
           site_name: currentSiteName,
           announcement: siteAnnouncement,
+          contact_info: contactInfo,
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
           category_images: categoryImages,
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
+        }, corsHeaders);
+      }
+
+      // 路由 1.8: 买家验证优惠券
+      if (path === "/api/coupon/verify") {
+        const code = (url.searchParams.get("code") || "").trim().toUpperCase();
+        const rawPrice = parseFloat(url.searchParams.get("price") || "0");
+        if (!code) return jsonResponse({ code: -1, msg: "请输入优惠券代码" }, corsHeaders);
+
+        const coupon = await env.DB.prepare("SELECT * FROM coupons WHERE code = ? AND status = 1").bind(code).first();
+        if (!coupon) return jsonResponse({ code: -1, msg: "优惠码不存在或已停用" }, corsHeaders);
+
+        if (coupon.max_uses !== -1 && coupon.used_count >= coupon.max_uses) {
+          return jsonResponse({ code: -1, msg: "该优惠券已被领完或达到使用上限" }, corsHeaders);
+        }
+
+        if (rawPrice < (coupon.min_amount || 0)) {
+          return jsonResponse({ code: -1, msg: `该优惠券需订单金额满 ￥${coupon.min_amount} 才能使用` }, corsHeaders);
+        }
+
+        let discount = 0;
+        if (coupon.discount_type === 'percent') {
+          discount = rawPrice * (1 - coupon.discount_val / 100);
+        } else {
+          discount = coupon.discount_val;
+        }
+        discount = Math.min(Math.max(0, rawPrice - 0.01), discount);
+        const finalPrice = Math.max(0.01, rawPrice - discount);
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 优惠码有效！已立减 ￥${discount.toFixed(2)}`,
+          data: {
+            code: coupon.code,
+            discount: discount.toFixed(2),
+            final_price: finalPrice.toFixed(2),
+            discount_type: coupon.discount_type,
+            discount_val: coupon.discount_val
+          }
         }, corsHeaders);
       }
 
@@ -101,6 +147,7 @@ export default {
         const body = await request.json();
         const region = body.region || "美国";
         const contact = (body.contact || "").trim();
+        const couponCode = (body.coupon_code || "").trim().toUpperCase();
 
         // 防刷频控：限制同一时间段内大量生成未支付订单
         try {
@@ -134,14 +181,34 @@ export default {
           }
         } catch (e) {}
         const price = parseFloat(basePriceStr);
+        let finalPrice = price;
+
+        if (couponCode) {
+          try {
+            const coupon = await env.DB.prepare("SELECT * FROM coupons WHERE code = ? AND status = 1").bind(couponCode).first();
+            if (coupon && (coupon.max_uses === -1 || coupon.used_count < coupon.max_uses) && price >= (coupon.min_amount || 0)) {
+              let discount = 0;
+              if (coupon.discount_type === 'percent') {
+                discount = price * (1 - coupon.discount_val / 100);
+              } else {
+                discount = coupon.discount_val;
+              }
+              discount = Math.min(Math.max(0, price - 0.01), discount);
+              if (discount > 0) {
+                finalPrice = Math.max(0.01, price - discount);
+                await env.DB.prepare("UPDATE coupons SET used_count = used_count + 1 WHERE id = ?").bind(coupon.id).run();
+              }
+            }
+          } catch(e) {}
+        }
 
         const checkCode = Math.floor(1000 + Math.random() * 9000).toString();
         const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
 
         await env.DB.prepare(`
-          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count)
-          VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0)
-        `).bind(orderNo, region, contact, price, `核销码:${checkCode}`).run();
+          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count, coupon_code)
+          VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0, ?)
+        `).bind(orderNo, region, contact, finalPrice, `核销码:${checkCode}`, couponCode).run();
 
         return jsonResponse({
           code: 0,
@@ -149,8 +216,10 @@ export default {
           data: {
             order_no: orderNo,
             check_code: checkCode,
-            price: price.toFixed(2),
-            region: region
+            price: finalPrice.toFixed(2),
+            original_price: price.toFixed(2),
+            region: region,
+            coupon_code: couponCode
           }
         }, corsHeaders);
       }
@@ -337,6 +406,7 @@ export default {
         let pushplusToken = "";
         let categoryPrices = {};
         let categoryImages = {};
+        let contactInfo = { wechat: "", wechat_qr: "", telegram: "", qq: "", custom_tip: "" };
 
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
@@ -363,7 +433,18 @@ export default {
           if (catImgRow && catImgRow.value) {
             try { categoryImages = JSON.parse(catImgRow.value); } catch(e) {}
           }
+
+          const contactRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CONTACT_INFO'").first();
+          if (contactRow && contactRow.value) {
+            try { contactInfo = JSON.parse(contactRow.value); } catch(e) {}
+          }
         } catch (e) {}
+
+        let couponList = [];
+        try {
+          const couponRes = await env.DB.prepare("SELECT * FROM coupons ORDER BY id DESC").all();
+          if (couponRes && couponRes.results) couponList = couponRes.results;
+        } catch(e) {}
 
         let allCategories = ["美国", "香港", "日本", "台湾", "通用"];
         try {
@@ -382,6 +463,8 @@ export default {
           price: parseFloat(currentPrice).toFixed(2),
           site_name: currentSiteName,
           announcement: currentAnnouncement,
+          contact_info: contactInfo,
+          coupons: couponList,
           pushplus_token: pushplusToken,
           category_prices: categoryPrices,
           category_images: categoryImages,
@@ -598,6 +681,76 @@ export default {
         return jsonResponse({
           code: 0,
           msg: `🎉 管理密钥已成功修改为【${newKey}】！请务必牢记！`
+        }, corsHeaders);
+      }
+
+      // 路由 6.75: 管理员后台 - 设置客服联系方式
+      if (path === "/api/admin/set_contact_info" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const contactInfo = body.contact_info || {};
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('CONTACT_INFO', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(contactInfo)).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "🎉 客服联系方式已保存生效！"
+        }, corsHeaders);
+      }
+
+      // 路由 6.76: 管理员后台 - 创建优惠券
+      if (path === "/api/admin/create_coupon" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const code = (body.code || "").trim().toUpperCase();
+        const discountType = body.discount_type === 'percent' ? 'percent' : 'fixed';
+        const discountVal = parseFloat(body.discount_val || 0);
+        const maxUses = parseInt(body.max_uses !== undefined && body.max_uses !== "" ? body.max_uses : -1);
+        const minAmount = parseFloat(body.min_amount || 0);
+
+        if (!code) return jsonResponse({ code: -1, msg: "优惠码代码不能为空" }, corsHeaders);
+        if (discountVal <= 0) return jsonResponse({ code: -1, msg: "优惠面额必须大于0" }, corsHeaders);
+
+        try {
+          await env.DB.prepare(`
+            INSERT INTO coupons (code, discount_type, discount_val, min_amount, max_uses, used_count, status)
+            VALUES (?, ?, ?, ?, ?, 0, 1)
+          `).bind(code, discountType, discountVal, minAmount, maxUses).run();
+
+          return jsonResponse({
+            code: 0,
+            msg: `🎉 优惠码【${code}】创建成功！`
+          }, corsHeaders);
+        } catch(e) {
+          return jsonResponse({ code: -1, msg: "创建失败，该优惠码可能已存在！" }, corsHeaders);
+        }
+      }
+
+      // 路由 6.77: 管理员后台 - 删除优惠券
+      if (path === "/api/admin/delete_coupon" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const id = body.id;
+        await env.DB.prepare("DELETE FROM coupons WHERE id = ?").bind(id).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "🗑️ 优惠码已成功删除！"
         }, corsHeaders);
       }
 
@@ -889,6 +1042,24 @@ async function checkAndSendLowStockAlert(env, region) {
 async function ensureDbMigrated(env) {
   try {
     await env.DB.prepare("ALTER TABLE orders ADD COLUMN replace_count INTEGER DEFAULT 0").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN coupon_code TEXT DEFAULT ''").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS coupons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE NOT NULL,
+        discount_type TEXT NOT NULL,
+        discount_val REAL NOT NULL,
+        min_amount REAL DEFAULT 0,
+        max_uses INTEGER DEFAULT -1,
+        used_count INTEGER DEFAULT 0,
+        status INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
   } catch (e) {}
 }
 
@@ -1211,6 +1382,22 @@ function getFrontendHTML(env) {
           <input type="text" id="contact" placeholder="建议填写您的手机号或QQ/邮箱" class="w-full px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
         </div>
 
+        <!-- 优惠抵扣码输入框 -->
+        <div class="p-3 bg-slate-900/60 rounded-xl border border-slate-800 space-y-2">
+          <div class="flex items-center justify-between text-xs">
+            <label class="font-medium text-slate-300 flex items-center gap-1.5">
+              <i class="fa-solid fa-ticket text-pink-400"></i> 优惠券 / 折扣码 (选填)：
+            </label>
+            <span id="coupon-applied-badge" class="hidden text-[11px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30"></span>
+          </div>
+          <div class="flex gap-2">
+            <input type="text" id="coupon-code-input" placeholder="输入优惠码 (如 VIP88)" class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 text-xs font-mono uppercase">
+            <button type="button" onclick="applyCoupon()" id="btn-apply-coupon" class="px-4 py-2 bg-slate-800 hover:bg-pink-600 text-slate-300 hover:text-white font-bold rounded-lg text-xs transition shrink-0 border border-slate-700">
+              验证/使用
+            </button>
+          </div>
+        </div>
+
         <div class="pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div>
             <span class="text-sm text-slate-400">固定单价：</span>
@@ -1369,6 +1556,87 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
+    <!-- 弹窗 3：在线客服与常见售后解答 -->
+    <div id="modal-support" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
+      <div class="glass max-w-md w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40">
+        <div class="flex justify-between items-center border-b border-slate-700 pb-3">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-headset text-indigo-400"></i> 在线客服与售后帮助
+          </h3>
+          <button onclick="closeSupportModal()" class="text-slate-400 hover:text-white text-lg">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+
+        <div class="space-y-3 text-xs" id="support-contact-box">
+          <div class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-slate-300 flex items-center gap-1.5">
+                <i class="fa-brands fa-weixin text-emerald-400 text-sm"></i> 微信客服
+              </span>
+              <span id="support-wechat-val" class="font-mono text-emerald-400 font-bold select-all">--</span>
+            </div>
+            <div id="support-wechat-btn-wrap" class="flex justify-end">
+              <button onclick="copySingleField('support-wechat-val', '微信号已复制')" class="px-3 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded-lg text-[11px] font-medium transition">
+                复制微信号
+              </button>
+            </div>
+            <div id="support-wechat-qr-wrap" class="hidden pt-2 text-center border-t border-slate-800">
+              <img id="support-wechat-qr-img" src="" class="w-32 h-32 rounded-lg object-contain mx-auto border border-slate-700">
+              <span class="text-[10px] text-slate-500 mt-1 block">扫码添加站长微信</span>
+            </div>
+          </div>
+
+          <div id="support-telegram-box" class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 flex items-center justify-between hidden">
+            <span class="font-bold text-slate-300 flex items-center gap-1.5">
+              <i class="fa-brands fa-telegram text-sky-400 text-sm"></i> Telegram
+            </span>
+            <a id="support-tg-link" href="#" target="_blank" class="px-3 py-1 bg-sky-600/80 hover:bg-sky-600 text-white rounded-lg text-[11px] font-medium transition">
+              点击直达联系
+            </a>
+          </div>
+
+          <div id="support-qq-box" class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 flex items-center justify-between hidden">
+            <span class="font-bold text-slate-300 flex items-center gap-1.5">
+              <i class="fa-brands fa-qq text-indigo-400 text-sm"></i> QQ / QQ群
+            </span>
+            <span id="support-qq-val" class="font-mono text-indigo-300 font-bold select-all">--</span>
+          </div>
+
+          <div id="support-custom-tip" class="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-200 text-[11px] leading-relaxed hidden"></div>
+        </div>
+
+        <!-- 常见问题极速解答 -->
+        <div class="space-y-2 pt-2 border-t border-slate-700/80">
+          <div class="text-[11px] font-bold text-indigo-300 flex items-center gap-1">
+            <i class="fa-solid fa-circle-question"></i> 常见问题解答：
+          </div>
+          <div class="space-y-1.5 text-[11px] text-slate-400">
+            <div class="p-2 bg-slate-900/70 rounded-lg border border-slate-800">
+              <b class="text-slate-200">Q: 付款后怎么提取账号？</b><br>
+              A: 付款后点击“我已付款”，网页将自动弹出账号密码；若关闭网页，可在顶部“订单查询”随时找回。
+            </div>
+            <div class="p-2 bg-slate-900/70 rounded-lg border border-slate-800">
+              <b class="text-slate-200">Q: 账号提示锁定/密码错误？</b><br>
+              A: 订单拥有 2 小时质保，在出卡结果弹窗直接点击【密码错误换号】即可秒级换发最新可用账号！
+            </div>
+          </div>
+        </div>
+
+        <button onclick="closeSupportModal()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium transition">
+          关闭
+        </button>
+      </div>
+    </div>
+
+    <!-- 悬浮在线客服入口 -->
+    <div class="fixed bottom-6 right-6 z-40">
+      <button onclick="openSupportModal()" class="px-4 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-full shadow-2xl flex items-center gap-2 border border-white/20 transition transform hover:scale-105 active:scale-95 group">
+        <i class="fa-solid fa-headset text-base animate-pulse"></i>
+        <span class="text-xs">在线客服</span>
+      </button>
+    </div>
+
     <div class="text-center text-xs text-slate-500 space-y-1">
       <p>自动发卡服务系统 · 24小时智能极速出卡</p>
       <p>Powered by Cloudflare Workers & D1</p>
@@ -1477,11 +1745,85 @@ function getFrontendHTML(env) {
     var globalDefaultPrice = "4.99";
     var globalCategoryPrices = {};
     var globalCategoryImages = {};
+    var appliedCouponCode = "";
+    var currentContactInfo = {};
 
     function updateDisplayPriceForRegion(region) {
-      var price = globalCategoryPrices[region] || globalDefaultPrice;
+      var price = parseFloat(globalCategoryPrices[region] || globalDefaultPrice);
       var pEl = document.getElementById("display-price");
-      if (pEl) pEl.innerText = "￥" + parseFloat(price).toFixed(2);
+      var badge = document.getElementById("coupon-applied-badge");
+
+      if (appliedCouponCode) {
+        var codeInp = document.getElementById("coupon-code-input");
+        if (codeInp && codeInp.value) {
+          applyCoupon(true);
+          return;
+        }
+      }
+      if (badge) badge.classList.add("hidden");
+      if (pEl) pEl.innerText = "￥" + price.toFixed(2);
+    }
+
+    async function applyCoupon(silent) {
+      var codeInp = document.getElementById("coupon-code-input");
+      var code = (codeInp ? codeInp.value : "").trim().toUpperCase();
+      var badge = document.getElementById("coupon-applied-badge");
+      var btn = document.getElementById("btn-apply-coupon");
+      var currentPrice = parseFloat(globalCategoryPrices[currentSelectedRegion] || globalDefaultPrice);
+
+      if (!code) {
+        appliedCouponCode = "";
+        if (badge) badge.classList.add("hidden");
+        var pEl = document.getElementById("display-price");
+        if (pEl) pEl.innerText = "￥" + currentPrice.toFixed(2);
+        if (!silent) alert("请输入优惠码");
+        return;
+      }
+
+      if (btn && !silent) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+      }
+
+      try {
+        var res = await fetch("/api/coupon/verify?code=" + encodeURIComponent(code) + "&price=" + currentPrice);
+        var json = await res.json();
+        if (json.code === 0 && json.data) {
+          appliedCouponCode = json.data.code;
+          if (badge) {
+            badge.innerText = "已立减 ￥" + json.data.discount;
+            badge.classList.remove("hidden");
+          }
+          var pEl = document.getElementById("display-price");
+          if (pEl) {
+            pEl.innerHTML = '<span class="line-through text-slate-500 text-sm font-normal mr-1.5">￥' + currentPrice.toFixed(2) + '</span>￥' + json.data.final_price;
+          }
+          if (!silent) showToast("🎉 优惠码已生效，立减 ￥" + json.data.discount + "！");
+        } else {
+          appliedCouponCode = "";
+          if (badge) badge.classList.add("hidden");
+          var pEl = document.getElementById("display-price");
+          if (pEl) pEl.innerText = "￥" + currentPrice.toFixed(2);
+          if (!silent) alert(json.msg || "优惠码无效");
+        }
+      } catch(e) {
+        if (!silent) alert("验证异常，请重试");
+      } finally {
+        if (btn && !silent) {
+          btn.disabled = false;
+          btn.innerHTML = "验证/使用";
+        }
+      }
+    }
+
+    function openSupportModal() {
+      var modal = document.getElementById("modal-support");
+      if (modal) modal.classList.remove("hidden");
+    }
+
+    function closeSupportModal() {
+      var modal = document.getElementById("modal-support");
+      if (modal) modal.classList.add("hidden");
     }
 
     async function loadStats() {
@@ -1510,6 +1852,41 @@ function getFrontendHTML(env) {
             var banner = document.getElementById("site-announcement-bar");
             if (banner) banner.classList.add("hidden");
           }
+
+          if (json.contact_info) {
+            currentContactInfo = json.contact_info;
+            var wxVal = document.getElementById("support-wechat-val");
+            var wxQrWrap = document.getElementById("support-wechat-qr-wrap");
+            var wxQrImg = document.getElementById("support-wechat-qr-img");
+            var tgBox = document.getElementById("support-telegram-box");
+            var tgLink = document.getElementById("support-tg-link");
+            var qqBox = document.getElementById("support-qq-box");
+            var qqVal = document.getElementById("support-qq-val");
+            var tipEl = document.getElementById("support-custom-tip");
+
+            if (wxVal) wxVal.innerText = currentContactInfo.wechat || "站长微信";
+            if (currentContactInfo.wechat_qr && wxQrWrap && wxQrImg) {
+              wxQrImg.src = currentContactInfo.wechat_qr;
+              wxQrWrap.classList.remove("hidden");
+            }
+            if (currentContactInfo.telegram && tgBox && tgLink) {
+              tgLink.href = currentContactInfo.telegram.startsWith("http") ? currentContactInfo.telegram : ("https://t.me/" + currentContactInfo.telegram.replace("@", ""));
+              tgBox.classList.remove("hidden");
+            } else if (tgBox) {
+              tgBox.classList.add("hidden");
+            }
+            if (currentContactInfo.qq && qqBox && qqVal) {
+              qqVal.innerText = currentContactInfo.qq;
+              qqBox.classList.remove("hidden");
+            } else if (qqBox) {
+              qqBox.classList.add("hidden");
+            }
+            if (currentContactInfo.custom_tip && tipEl) {
+              tipEl.innerText = currentContactInfo.custom_tip;
+              tipEl.classList.remove("hidden");
+            }
+          }
+
           renderRegions();
         }
       } catch (e) {
@@ -1679,7 +2056,11 @@ function getFrontendHTML(env) {
         var res = await fetch("/api/order/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ region: currentSelectedRegion, contact: contact })
+          body: JSON.stringify({ 
+            region: currentSelectedRegion, 
+            contact: contact,
+            coupon_code: appliedCouponCode 
+          })
         });
         var data = await res.json();
         if (data.code === 0) {
@@ -2098,6 +2479,108 @@ function getAdminHTML(env) {
         </div>
         <p class="text-[10px] text-slate-500">修改后立即生效，下次登录或刷新请使用新密码。</p>
       </div>
+
+      <!-- 7. 客服悬浮窗与联系方式配置 -->
+      <div class="space-y-3 pt-2 border-t border-slate-800/80">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-headset text-indigo-400"></i> 前台客服悬浮窗与联系方式配置
+          </label>
+          <span class="text-[10px] text-slate-500">前台右下角悬浮弹窗展示</span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1"><i class="fa-brands fa-weixin text-emerald-400"></i> 客服微信号</label>
+            <input type="text" id="contact-wechat-input" placeholder="如: apple_helper88" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          </div>
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1"><i class="fa-brands fa-telegram text-sky-400"></i> Telegram (用户名/链接)</label>
+            <input type="text" id="contact-tg-input" placeholder="如: @my_support 或 t.me/xxx" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          </div>
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1"><i class="fa-brands fa-qq text-blue-400"></i> 客服 QQ</label>
+            <input type="text" id="contact-qq-input" placeholder="如: 12345678" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          </div>
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1"><i class="fa-solid fa-comment-dots text-amber-400"></i> 客服公告/售后说明</label>
+            <input type="text" id="contact-tip-input" placeholder="如: 7x24小时全天候在线，包换包售后" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          </div>
+        </div>
+        <div class="space-y-1.5 pt-1">
+          <label class="text-[11px] text-slate-400 flex items-center gap-1"><i class="fa-solid fa-qrcode text-emerald-400"></i> 客服微信二维码</label>
+          <div class="flex gap-3 items-center">
+            <div class="w-14 h-14 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+              <img id="contact-qr-preview" src="" alt="客服二维码" class="w-full h-full object-contain hidden">
+              <span id="no-contact-qr-text" class="text-[10px] text-slate-500">未设置</span>
+            </div>
+            <div class="flex-1 flex flex-col sm:flex-row gap-2">
+              <input type="file" id="contact-qr-file" accept="image/*" class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-indigo-600 file:text-white cursor-pointer">
+              <button onclick="uploadContactQrFile()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-lg text-xs shrink-0 flex items-center justify-center gap-1">
+                <i class="fa-solid fa-upload"></i> 上传二维码
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="pt-1 flex justify-end">
+          <button onclick="saveContactInfo()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow">
+            <i class="fa-solid fa-floppy-disk"></i> 保存客服联系配置
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 🎫 优惠券与折扣营销管理 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <div class="flex justify-between items-center">
+        <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-ticket"></i> 优惠券与折扣营销管理
+        </h2>
+        <span class="text-[11px] text-slate-500">买家下单可输入折扣券立减</span>
+      </div>
+
+      <!-- 创建优惠券表单 -->
+      <div class="p-3 bg-slate-800/80 rounded-xl border border-slate-700 space-y-2.5">
+        <div class="text-xs font-semibold text-slate-300 flex items-center gap-1">
+          <i class="fa-solid fa-plus-circle text-emerald-400"></i> 创建新优惠码
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">优惠券代码</label>
+            <input type="text" id="new-coupon-code" placeholder="如 VIP888" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-mono uppercase">
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">优惠模式</label>
+            <select id="new-coupon-type" class="w-full px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white">
+              <option value="fixed">固定金额立减 (￥)</option>
+              <option value="percent">百分比折扣 (%)</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">优惠面额 (元 或 折扣%)</label>
+            <input type="number" step="0.01" id="new-coupon-val" placeholder="如 1.00 或 20(八折)" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-emerald-400 font-bold">
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">门槛金额 (0为无门槛)</label>
+            <input type="number" step="0.01" id="new-coupon-min" placeholder="0" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-mono">
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-400 block mb-1">最大可使用次数</label>
+            <input type="number" id="new-coupon-max" placeholder="留空为无限制" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-mono">
+          </div>
+        </div>
+        <div class="flex justify-end pt-1">
+          <button onclick="createAdminCoupon()" class="px-4 py-1.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow transition">
+            <i class="fa-solid fa-plus"></i> 生成并启用优惠券
+          </button>
+        </div>
+      </div>
+
+      <!-- 优惠券列表 -->
+      <div id="coupon-list-container" class="space-y-2">
+        <div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">
+          暂无优惠券记录
+        </div>
+      </div>
     </div>
 
     <!-- 批量导入卡密 (支持自定义多品类) -->
@@ -2301,6 +2784,29 @@ function getAdminHTML(env) {
             document.getElementById("current-qrcode-preview").src = json.qrcode;
             document.getElementById("current-qrcode-preview").classList.remove("hidden");
             document.getElementById("no-qrcode-text").classList.add("hidden");
+          }
+
+          if (json.contact_info) {
+            var cWechat = document.getElementById("contact-wechat-input");
+            var cTg = document.getElementById("contact-tg-input");
+            var cQq = document.getElementById("contact-qq-input");
+            var cTip = document.getElementById("contact-tip-input");
+            var cQrPrev = document.getElementById("contact-qr-preview");
+            var noQrTxt = document.getElementById("no-contact-qr-text");
+
+            if (cWechat && !cWechat.value) cWechat.value = json.contact_info.wechat || "";
+            if (cTg && !cTg.value) cTg.value = json.contact_info.telegram || "";
+            if (cQq && !cQq.value) cQq.value = json.contact_info.qq || "";
+            if (cTip && !cTip.value) cTip.value = json.contact_info.custom_tip || "";
+            if (json.contact_info.wechat_qr && cQrPrev) {
+              cQrPrev.src = json.contact_info.wechat_qr;
+              cQrPrev.classList.remove("hidden");
+              if (noQrTxt) noQrTxt.classList.add("hidden");
+            }
+          }
+
+          if (json.coupons) {
+            renderCouponsTable(json.coupons);
           }
 
           // 核心分类逻辑：严格拆分【买家已提交付款】与【仅下单未付款】
@@ -2998,6 +3504,173 @@ function getAdminHTML(env) {
         loadAdminData();
       } catch (e) {
         alert("导入失败");
+      }
+    }
+
+    var currentContactQr = "";
+
+    async function uploadContactQrFile() {
+      var fileInput = document.getElementById("contact-qr-file");
+      var key = document.getElementById("admin-key").value.trim();
+      if (!fileInput.files || fileInput.files.length === 0) return alert("请先选择客服二维码图片");
+
+      var file = fileInput.files[0];
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var img = new Image();
+        img.onload = async function() {
+          var canvas = document.createElement("canvas");
+          var maxDim = 400;
+          var w = img.width, h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+            else { w = Math.round(w * maxDim / h); h = maxDim; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          var ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          currentContactQr = canvas.toDataURL("image/jpeg", 0.85);
+
+          var cQrPrev = document.getElementById("contact-qr-preview");
+          var noQrTxt = document.getElementById("no-contact-qr-text");
+          if (cQrPrev) {
+            cQrPrev.src = currentContactQr;
+            cQrPrev.classList.remove("hidden");
+          }
+          if (noQrTxt) noQrTxt.classList.add("hidden");
+          alert("二维码已就绪，请点击下方的【保存客服联系配置】生效！");
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function saveContactInfo() {
+      var key = document.getElementById("admin-key").value.trim();
+      var wechat = (document.getElementById("contact-wechat-input") ? document.getElementById("contact-wechat-input").value.trim() : "");
+      var tg = (document.getElementById("contact-tg-input") ? document.getElementById("contact-tg-input").value.trim() : "");
+      var qq = (document.getElementById("contact-qq-input") ? document.getElementById("contact-qq-input").value.trim() : "");
+      var tip = (document.getElementById("contact-tip-input") ? document.getElementById("contact-tip-input").value.trim() : "");
+      var cQrPrev = document.getElementById("contact-qr-preview");
+      var qrSrc = (cQrPrev && !cQrPrev.classList.contains("hidden")) ? cQrPrev.src : (currentContactQr || "");
+
+      try {
+        var res = await fetch("/api/admin/set_contact_info", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: key,
+            contact_info: {
+              wechat: wechat,
+              telegram: tg,
+              qq: qq,
+              custom_tip: tip,
+              wechat_qr: qrSrc
+            }
+          })
+        });
+        var json = await res.json();
+        alert(json.msg || "客服配置保存成功");
+        loadAdminData();
+      } catch (e) {
+        alert("保存失败");
+      }
+    }
+
+    function renderCouponsTable(coupons) {
+      var container = document.getElementById("coupon-list-container");
+      if (!container) return;
+
+      if (!coupons || coupons.length === 0) {
+        container.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无已创建优惠券</div>';
+        return;
+      }
+
+      var html = coupons.map(function(c) {
+        var discountDesc = c.discount_type === 'percent' ? (c.discount_val + '% OFF (打 ' + ((100 - c.discount_val) / 10).toFixed(1) + ' 折)') : ('立减 ￥' + Number(c.discount_val).toFixed(2));
+        var usesDesc = (c.max_uses === -1 || c.max_uses === null) ? (c.used_count + ' / 无限次') : (c.used_count + ' / ' + c.max_uses + ' 次');
+        var minDesc = (c.min_amount && c.min_amount > 0) ? ('满 ￥' + c.min_amount) : '无门槛';
+        var isExhausted = (c.max_uses > 0 && c.used_count >= c.max_uses);
+
+        return '<div class="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">' +
+          '<div class="space-y-1">' +
+            '<div class="flex items-center gap-2">' +
+              '<span class="font-mono font-bold text-amber-300 text-sm px-2 py-0.5 bg-amber-500/10 rounded border border-amber-500/30">' + c.code + '</span>' +
+              '<span class="font-bold text-emerald-400">' + discountDesc + '</span>' +
+              (isExhausted ? '<span class="text-[10px] px-1.5 py-0.5 bg-rose-500/20 text-rose-300 rounded">已领完</span>' : '<span class="text-[10px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded">生效中</span>') +
+            '</div>' +
+            '<div class="text-[11px] text-slate-400 flex items-center gap-3">' +
+              '<span>门槛: <b class="text-slate-300">' + minDesc + '</b></span>' +
+              '<span>已用: <b class="text-slate-300">' + usesDesc + '</b></span>' +
+              '<span>创建: ' + (c.created_at || '') + '</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="flex items-center gap-2 self-end sm:self-center">' +
+            '<button data-id="' + c.id + '" onclick="deleteAdminCoupon(this.dataset.id)" class="px-2.5 py-1 bg-rose-950/70 hover:bg-rose-900 text-rose-300 rounded text-xs border border-rose-800/80 transition flex items-center gap-1">' +
+              '<i class="fa-solid fa-trash-can"></i> 删除' +
+            '</button>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+
+      container.innerHTML = html;
+    }
+
+    async function createAdminCoupon() {
+      var key = document.getElementById("admin-key").value.trim();
+      var code = (document.getElementById("new-coupon-code").value || "").trim().toUpperCase();
+      var type = document.getElementById("new-coupon-type").value;
+      var val = parseFloat(document.getElementById("new-coupon-val").value || 0);
+      var min = parseFloat(document.getElementById("new-coupon-min").value || 0);
+      var maxStr = document.getElementById("new-coupon-max").value.trim();
+      var max = maxStr === "" ? -1 : parseInt(maxStr);
+
+      if (!code) return alert("请输入优惠券代码（如 VIP888）");
+      if (isNaN(val) || val <= 0) return alert("请输入有效的优惠面额");
+
+      try {
+        var res = await fetch("/api/admin/create_coupon", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: key,
+            code: code,
+            discount_type: type,
+            discount_val: val,
+            min_amount: min,
+            max_uses: max
+          })
+        });
+        var json = await res.json();
+        alert(json.msg || "优惠券创建成功");
+        if (json.code === 0) {
+          document.getElementById("new-coupon-code").value = "";
+          document.getElementById("new-coupon-val").value = "";
+          document.getElementById("new-coupon-min").value = "";
+          document.getElementById("new-coupon-max").value = "";
+          loadAdminData();
+        }
+      } catch (e) {
+        alert("创建失败");
+      }
+    }
+
+    async function deleteAdminCoupon(id) {
+      var key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确定要删除该优惠券吗？")) return;
+
+      try {
+        var res = await fetch("/api/admin/delete_coupon", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, id: id })
+        });
+        var json = await res.json();
+        alert(json.msg || "优惠券已删除");
+        loadAdminData();
+      } catch (e) {
+        alert("删除失败");
       }
     }
 
