@@ -615,12 +615,53 @@ function getFrontendHTML(env) {
       </button>
     </div>
 
-    <div class="text-center mb-8">
-      <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-4 border border-indigo-500/30">
+    <div class="text-center mb-6">
+      <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-3 border border-indigo-500/30">
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
       <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
       <p class="text-slate-400 text-sm">24小时极速出卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
+    </div>
+
+    <!-- 顶部重要安全使用须知 (图文指引) -->
+    <div class="mb-6 p-4 sm:p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-md shadow-xl relative overflow-hidden">
+      <div class="absolute -right-6 -bottom-6 text-amber-500/10 text-8xl pointer-events-none">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+      </div>
+      <div class="flex items-center gap-2 mb-3">
+        <span class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 font-bold text-sm">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+        </span>
+        <h3 class="font-bold text-sm sm:text-base text-amber-300">安全使用须知（必读）</h3>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-emerald-500/30 flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-base">
+            <i class="fa-brands fa-apple"></i>
+          </div>
+          <div>
+            <div class="font-bold text-emerald-400 flex items-center gap-1">
+              <i class="fa-solid fa-circle-check"></i> 仅在 App Store 登录
+            </div>
+            <div class="text-slate-300 mt-0.5 leading-relaxed">
+              打开苹果应用商店（App Store），点击右上角头像退出当前账号并登录购买的账号即可下载。
+            </div>
+          </div>
+        </div>
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-rose-500/30 flex items-start gap-3">
+          <div class="w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 text-base">
+            <i class="fa-solid fa-ban"></i>
+          </div>
+          <div>
+            <div class="font-bold text-rose-400 flex items-center gap-1">
+              <i class="fa-solid fa-circle-xmark"></i> 切勿在设置中登录 iCloud
+            </div>
+            <div class="text-slate-300 mt-0.5 leading-relaxed">
+              严禁在手机系统【设置】或【iCloud】中登录共享账号，避免同步个人数据或导致手机被锁！
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="glass rounded-2xl p-6 sm:p-8 shadow-2xl mb-6">
@@ -786,9 +827,9 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
-    <div class="text-center text-xs text-slate-500 space-y-2">
-      <p>⚠️ 提示：账号仅供在 App Store 登录下载应用，切勿在系统设置中登录 iCloud！</p>
-      <p><a href="/admin" class="hover:text-indigo-400">管理后台</a> · Powered by Cloudflare Workers & D1</p>
+    <div class="text-center text-xs text-slate-500 space-y-1">
+      <p>自动发卡服务系统 · 24小时智能极速出卡</p>
+      <p>Powered by Cloudflare Workers & D1</p>
     </div>
   </div>
 
