@@ -1,0 +1,23 @@
+{
+  "name": "cf-auto-faka",
+  "version": "1.0.0",
+  "description": "基于 Cloudflare Workers + D1 数据库构建的智能自动抓取发卡系统",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute faka-db --file=./schema.sql"
+  },
+  "keywords": [
+    "cloudflare",
+    "worker",
+    "faka",
+    "d1",
+    "serverless"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
