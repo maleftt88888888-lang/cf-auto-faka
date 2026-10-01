@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统 (支持收款码直接上传至 Cloudflare D1 存储)
+ * Cloudflare Worker - 智能自动抓取发卡系统 (支持后台自定义固定金额与收款码上传)
  */
 
 export default {
@@ -25,7 +25,7 @@ export default {
     }
 
     try {
-      // 路由 1: 获取各地区库存统计及网站配置（优先读取 D1 中保存的收款码）
+      // 路由 1: 获取各地区库存统计及网站配置（读取 D1 中保存的固定金额与收款码）
       if (path === "/api/stats") {
         const rows = await env.DB.prepare(`
           SELECT region, COUNT(CASE WHEN status = 0 THEN 1 END) as stock, COUNT(CASE WHEN status = 1 THEN 1 END) as sold
@@ -49,25 +49,27 @@ export default {
           }
         }
 
-        // 读取保存在 D1 中的收款码图片
+        // 读取保存在 D1 中的收款码与固定金额
         let qrcode = env.PAY_QRCODE_URL || "";
+        let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         try {
-          const settingRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
-          if (settingRow && settingRow.value) {
-            qrcode = settingRow.value;
-          }
+          const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
+          if (qrRow && qrRow.value) qrcode = qrRow.value;
+
+          const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
+          if (priceRow && priceRow.value) currentPrice = priceRow.value;
         } catch (e) {}
 
         return jsonResponse({
           code: 0,
           data: Object.values(regionMap),
-          site_name: env.SITE_NAME || "云账号智能发卡平台",
-          price: env.PRICE_PER_ACCOUNT || "1.00",
+          site_name: env.SITE_NAME || "小火箭账号",
+          price: parseFloat(currentPrice).toFixed(2),
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
       }
 
-      // 路由 2: 买家创建订单（生成专属4位核销码）
+      // 路由 2: 买家创建订单（使用当前设定的固定金额）
       if (path === "/api/order/create" && request.method === "POST") {
         const body = await request.json();
         const region = body.region || "美国";
@@ -82,9 +84,16 @@ export default {
           return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后再试或联系站长补货！` }, corsHeaders);
         }
 
+        // 获取固定金额
+        let priceStr = env.PRICE_PER_ACCOUNT || "4.99";
+        try {
+          const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
+          if (priceRow && priceRow.value) priceStr = priceRow.value;
+        } catch (e) {}
+        const price = parseFloat(priceStr);
+
         const checkCode = Math.floor(1000 + Math.random() * 9000).toString();
         const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
-        const price = parseFloat(env.PRICE_PER_ACCOUNT || "1.00");
 
         await env.DB.prepare(`
           INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at)
@@ -122,7 +131,7 @@ export default {
       // 路由 4: 管理员后台 - 获取待核销订单列表与数据
       if (path === "/api/admin/orders") {
         const key = url.searchParams.get("key") || "";
-        if (key !== (env.ADMIN_KEY || "admin123456")) {
+        if (key !== (env.ADMIN_KEY || "51245124")) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -141,28 +150,58 @@ export default {
         `).all();
 
         let currentQrcode = "";
+        let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrSetting) currentQrcode = qrSetting.value;
+
+          const priceSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
+          if (priceSetting) currentPrice = priceSetting.value;
         } catch (e) {}
 
         return jsonResponse({
           code: 0,
           pending: pendingOrders.results || [],
           recent: recentPaid.results || [],
-          qrcode: currentQrcode
+          qrcode: currentQrcode,
+          price: parseFloat(currentPrice).toFixed(2)
         }, corsHeaders);
       }
 
-      // 路由 5: 管理员后台 - 一键上传收款码保存至 Cloudflare D1
-      if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
+      // 路由 5: 管理员后台 - 修改固定价格
+      if (path === "/api/admin/set_price" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "admin123456")) {
+        if (key !== (env.ADMIN_KEY || "51245124")) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
-        const imageData = body.image_data; // Base64 格式的图片数据
+        const price = parseFloat(body.price);
+        if (isNaN(price) || price <= 0) {
+          return jsonResponse({ code: -1, msg: "请输入有效的正数金额" }, corsHeaders);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('PRICE', ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+        `).bind(price.toFixed(2)).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 固定金额已成功设置为：￥${price.toFixed(2)}！`
+        }, corsHeaders);
+      }
+
+      // 路由 6: 管理员后台 - 一键上传收款码保存至 Cloudflare D1
+      if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const imageData = body.image_data;
         if (!imageData || !imageData.startsWith("data:image/")) {
           return jsonResponse({ code: -1, msg: "无效的图片格式" }, corsHeaders);
         }
@@ -179,11 +218,11 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 6: 管理员后台 - 一键核销并发卡
+      // 路由 7: 管理员后台 - 一键核销并发卡
       if (path === "/api/admin/approve" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "admin123456")) {
+        if (key !== (env.ADMIN_KEY || "51245124")) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
@@ -211,11 +250,11 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 7: 管理员手动批量导入卡密
+      // 路由 8: 管理员手动批量导入卡密
       if (path === "/api/admin/import" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
-        if (key !== (env.ADMIN_KEY || "admin123456")) {
+        if (key !== (env.ADMIN_KEY || "51245124")) {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
         const lines = (body.text || "").split("\n");
@@ -240,7 +279,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 8: 历史订单查询
+      // 路由 9: 历史订单查询
       if (path === "/api/order/query") {
         const queryVal = (url.searchParams.get("keyword") || "").trim();
         if (!queryVal) return jsonResponse({ code: -1, msg: "请输入订单号或联系方式" }, corsHeaders);
@@ -255,14 +294,14 @@ export default {
         return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
       }
 
-      // 路由 9: 管理员后台页面 (/admin)
+      // 路由 10: 管理员后台页面 (/admin)
       if (path === "/admin") {
         return new Response(getAdminHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
 
-      // 路由 10: 买家前台首页
+      // 路由 11: 买家前台首页
       if (path === "/" || path === "/index.html") {
         return new Response(getFrontendHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -289,7 +328,7 @@ function jsonResponse(data, headers = {}, status = 200) {
  * 买家前台页面
  */
 function getFrontendHTML(env) {
-  const siteName = env.SITE_NAME || "云账号智能发卡平台";
+  const siteName = env.SITE_NAME || "小火箭账号";
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -324,7 +363,6 @@ function getFrontendHTML(env) {
         </button>
       </div>
 
-      <!-- 购买面板 -->
       <div id="panel-buy" class="space-y-6">
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-3">选择地区分类：</label>
@@ -340,8 +378,8 @@ function getFrontendHTML(env) {
 
         <div class="pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div>
-            <span class="text-sm text-slate-400">应付金额：</span>
-            <span class="text-2xl font-bold text-indigo-400" id="display-price">￥1.00</span>
+            <span class="text-sm text-slate-400">固定单价：</span>
+            <span class="text-2xl font-bold text-indigo-400" id="display-price">￥4.99</span>
           </div>
           <button onclick="submitOrder()" id="btn-submit" class="w-full sm:w-auto px-8 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/25 transition duration-200 flex items-center justify-center gap-2">
             <i class="fa-solid fa-qrcode"></i> 立即扫码付款出卡
@@ -349,7 +387,6 @@ function getFrontendHTML(env) {
         </div>
       </div>
 
-      <!-- 订单查询面板 -->
       <div id="panel-query" class="space-y-6 hidden">
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-2">输入订单号或联系方式：</label>
@@ -378,7 +415,7 @@ function getFrontendHTML(env) {
         <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-left space-y-1">
           <div class="text-xs text-amber-300 font-medium">⚠️ 付款关键步骤：</div>
           <div class="text-xs text-slate-300 leading-relaxed">
-            1. 扫码支付金额：<span class="text-emerald-400 font-bold" id="pay-money">￥1.00</span><br>
+            1. 扫码固定支付：<span class="text-emerald-400 font-bold" id="pay-money">￥4.99</span><br>
             2. 微信付款备注填写：<span class="text-xl font-black text-amber-400 font-mono select-all" id="pay-check-code">8888</span>
           </div>
         </div>
@@ -616,8 +653,24 @@ function getAdminHTML(env) {
   <div class="space-y-4">
     <!-- 管理秘钥输入 -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 flex gap-2">
-      <input type="password" id="admin-key" placeholder="输入管理员密钥 (默认: admin123456)" value="admin123456" class="flex-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white">
+      <input type="password" id="admin-key" placeholder="输入管理员密钥" value="51245124" class="flex-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white">
       <button onclick="loadAdminData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">刷新</button>
+    </div>
+
+    <!-- 设置固定销售价格 -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-tag"></i> 设置固定销售价格 (元)
+      </h2>
+      <div class="flex gap-2">
+        <div class="relative flex-1">
+          <span class="absolute left-3 top-2 text-slate-400 text-sm">￥</span>
+          <input type="number" id="price-input" step="0.01" min="0.01" placeholder="4.99" class="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm font-bold text-emerald-400">
+        </div>
+        <button onclick="savePrice()" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1">
+          <i class="fa-solid fa-floppy-disk"></i> 保存固定价格
+        </button>
+      </div>
     </div>
 
     <!-- 上传微信收款码图片至 Cloudflare 存储 -->
@@ -689,6 +742,10 @@ function getAdminHTML(env) {
         const res = await fetch("/api/admin/orders?key=" + encodeURIComponent(key));
         const json = await res.json();
         if (json.code === 0) {
+          if (json.price) {
+            document.getElementById("price-input").value = json.price;
+          }
+
           if (json.qrcode) {
             document.getElementById("current-qrcode-preview").src = json.qrcode;
             document.getElementById("current-qrcode-preview").classList.remove("hidden");
@@ -726,6 +783,25 @@ function getAdminHTML(env) {
         }
       } catch (e) {
         alert("请求失败");
+      }
+    }
+
+    async function savePrice() {
+      const key = document.getElementById("admin-key").value.trim();
+      const price = document.getElementById("price-input").value.trim();
+      if (!price || parseFloat(price) <= 0) return alert("请输入有效的金额");
+
+      try {
+        const res = await fetch("/api/admin/set_price", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, price })
+        });
+        const json = await res.json();
+        alert(json.msg || "价格保存成功");
+        loadAdminData();
+      } catch (e) {
+        alert("价格保存失败");
       }
     }
 
