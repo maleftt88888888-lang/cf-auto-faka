@@ -56,6 +56,8 @@ export default {
         let qrcode = env.PAY_QRCODE_URL || "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
+        let categoryPrices = {};
+
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrRow && qrRow.value) qrcode = qrRow.value;
@@ -65,6 +67,11 @@ export default {
 
           const siteRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
           if (siteRow && siteRow.value) currentSiteName = siteRow.value;
+
+          const catPriceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
+          if (catPriceRow && catPriceRow.value) {
+            try { categoryPrices = JSON.parse(catPriceRow.value); } catch(e) {}
+          }
         } catch (e) {}
 
         return jsonResponse({
@@ -72,6 +79,7 @@ export default {
           data: Object.values(regionMap),
           site_name: currentSiteName,
           price: parseFloat(currentPrice).toFixed(2),
+          category_prices: categoryPrices,
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
       }
@@ -81,6 +89,17 @@ export default {
         const body = await request.json();
         const region = body.region || "美国";
         const contact = (body.contact || "").trim();
+
+        // 防刷频控：限制同一时间段内大量生成未支付订单
+        try {
+          const recentPending = await env.DB.prepare(`
+            SELECT COUNT(*) as cnt FROM orders 
+            WHERE status = 0 AND created_at > datetime('now', '+8 hours', '-10 minutes')
+          `).first();
+          if (recentPending && recentPending.cnt >= 25) {
+            return jsonResponse({ code: -1, msg: "系统排队繁忙，请稍后再试或先完成已有订单！" }, corsHeaders);
+          }
+        } catch(e) {}
 
         // 检查库存
         const countRes = await env.DB.prepare(
@@ -95,6 +114,12 @@ export default {
         try {
           const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
           if (priceRow && priceRow.value) basePriceStr = priceRow.value;
+
+          const catPriceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
+          if (catPriceRow && catPriceRow.value) {
+            const catMap = JSON.parse(catPriceRow.value);
+            if (catMap && catMap[region]) basePriceStr = catMap[region];
+          }
         } catch (e) {}
         const price = parseFloat(basePriceStr);
 
@@ -135,6 +160,9 @@ export default {
 
         const payTypeDesc = note ? `买家已付款(备注:${note})` : `买家已提交付款申请`;
         await env.DB.prepare("UPDATE orders SET pay_type = ? WHERE order_no = ?").bind(payTypeDesc, orderNo).run();
+
+        // 异步发送微信/PushPlus推送
+        ctx.waitUntil(sendPushNotification(env, order, note, url.origin));
 
         return jsonResponse({ code: 0, msg: "已成功通知站长核对发货！页面将自动保持轮询出卡..." }, corsHeaders);
       }
@@ -273,6 +301,9 @@ export default {
         let currentQrcode = "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
+        let pushplusToken = "";
+        let categoryPrices = {};
+
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrSetting) currentQrcode = qrSetting.value;
@@ -282,7 +313,24 @@ export default {
 
           const siteSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
           if (siteSetting) currentSiteName = siteSetting.value;
+
+          const pushSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PUSHPLUS_TOKEN'").first();
+          if (pushSetting) pushplusToken = pushSetting.value;
+
+          const catPriceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
+          if (catPriceRow && catPriceRow.value) {
+            try { categoryPrices = JSON.parse(catPriceRow.value); } catch(e) {}
+          }
         } catch (e) {}
+
+        let allCategories = ["美国", "香港", "日本", "台湾", "通用"];
+        try {
+          const catRows = await env.DB.prepare("SELECT DISTINCT region FROM carmis WHERE region IS NOT NULL").all();
+          if (catRows && catRows.results) {
+            const extraCats = catRows.results.map(r => r.region).filter(Boolean);
+            allCategories = Array.from(new Set([...allCategories, ...extraCats, ...Object.keys(categoryPrices)]));
+          }
+        } catch(e) {}
 
         return jsonResponse({
           code: 0,
@@ -290,7 +338,10 @@ export default {
           recent: recentPaid.results || [],
           qrcode: currentQrcode,
           price: parseFloat(currentPrice).toFixed(2),
-          site_name: currentSiteName
+          site_name: currentSiteName,
+          pushplus_token: pushplusToken,
+          category_prices: categoryPrices,
+          categories: allCategories
         }, corsHeaders);
       }
 
@@ -319,6 +370,27 @@ export default {
         }, corsHeaders);
       }
 
+      // 路由 6.2: 管理员后台 - 修改各品类独立价格
+      if (path === "/api/admin/set_category_prices" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const categoryPrices = body.category_prices || {};
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('CATEGORY_PRICES', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(categoryPrices)).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: "🎉 品类定价已保存生效！"
+        }, corsHeaders);
+      }
+
       // 路由 6.5: 管理员后台 - 修改网站名称
       if (path === "/api/admin/set_site_name" && request.method === "POST") {
         const body = await request.json();
@@ -341,6 +413,109 @@ export default {
         return jsonResponse({
           code: 0,
           msg: `🎉 网站名称已修改为：${siteName}`
+        }, corsHeaders);
+      }
+
+      // 路由 6.8: 管理员后台 - 设置微信 PushPlus 推送 Token
+      if (path === "/api/admin/set_pushplus" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const token = (body.token || "").trim();
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('PUSHPLUS_TOKEN', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(token).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: token ? "🎉 PushPlus 微信推送 Token 已保存！" : "已清除 PushPlus 微信推送设置"
+        }, corsHeaders);
+      }
+
+      // 路由 6.9: 管理员后台 - 测试微信推送
+      if (path === "/api/admin/test_pushplus" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        let token = (body.token || "").trim();
+        if (!token) {
+          const tokenRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PUSHPLUS_TOKEN'").first();
+          token = tokenRow ? tokenRow.value.trim() : "";
+        }
+        if (!token) {
+          return jsonResponse({ code: -1, msg: "请先输入并保存 PushPlus Token 再进行测试！" }, corsHeaders);
+        }
+
+        try {
+          const nowStr = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+          const randomId = Math.floor(1000 + Math.random() * 9000);
+          const testRes = await fetch("https://www.pushplus.plus/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              token: token,
+              title: `🔔【测试】发卡网微信推送测试成功 (${randomId})`,
+              content: `
+                <div style="font-family:sans-serif;background:#f0fdf4;padding:16px;border-radius:10px;border:1px solid #bbf7d0;">
+                  <h3 style="color:#15803d;margin-top:0;">🎉 微信推送通道连通成功！</h3>
+                  <p style="color:#374151;font-size:14px;line-height:1.6;">
+                    恭喜！您的微信来单提醒通道已完全生效。<br>
+                    当买家在商城扫码支付并提交凭证时，您的微信将在此第一时间收到来单卡片与一键发货入口！
+                  </p>
+                  <p style="color:#9ca3af;font-size:12px;margin-bottom:0;">
+                    测试时间：${nowStr} (编号:${randomId})
+                  </p>
+                </div>
+              `,
+              template: "html"
+            })
+          });
+          const testJson = await testRes.json();
+          if (testJson.code === 200) {
+            // 测试成功顺便将此有效 token 存入数据库
+            await env.DB.prepare(`
+              INSERT INTO settings (key, value, updated_at)
+              VALUES ('PUSHPLUS_TOKEN', ?, datetime('now', '+8 hours'))
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+            `).bind(token).run();
+            return jsonResponse({ code: 0, msg: "✅ 测试消息已成功发送到您的微信！请查看微信消息！" }, corsHeaders);
+          } else {
+            const detail = testJson.data || testJson.msg || "未知错误";
+            return jsonResponse({ 
+              code: -1, 
+              msg: `PushPlus 提示: ${detail}` 
+            }, corsHeaders);
+          }
+        } catch(e) {
+          return jsonResponse({ code: -1, msg: "推送接口请求失败: " + e.message }, corsHeaders);
+        }
+      }
+
+      // 路由 6.95: 管理员后台 - 清理24小时未付款废单
+      if (path === "/api/admin/clear_expired" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const delRes = await env.DB.prepare(`
+          DELETE FROM orders 
+          WHERE status = 0 AND created_at < datetime('now', '+8 hours', '-24 hours')
+        `).run();
+
+        const count = delRes.meta && delRes.meta.changes ? delRes.meta.changes : 0;
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 已成功清理 ${count} 笔超过 24 小时的未付款无效订单！`
         }, corsHeaders);
       }
 
@@ -450,6 +625,48 @@ async function ensureDbMigrated(env) {
   try {
     await env.DB.prepare("ALTER TABLE orders ADD COLUMN replace_count INTEGER DEFAULT 0").run();
   } catch (e) {}
+}
+
+/**
+ * 微信公众号 / PushPlus 免费来单推送
+ */
+async function sendPushNotification(env, order, note, origin) {
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PUSHPLUS_TOKEN'").first();
+    if (!row || !row.value) return;
+    const token = row.value.trim();
+    if (!token) return;
+
+    const safeNote = note || "买家已扫码，申请发货";
+    const content = `
+      <div style="font-family:sans-serif;max-width:500px;background:#f8fafc;padding:16px;border-radius:12px;border:1px solid #e2e8f0;">
+        <h3 style="color:#059669;margin-top:0;font-size:18px;">💰 收到新订单付款申请！</h3>
+        <table style="width:100%;font-size:14px;line-height:1.8;color:#334155;">
+          <tr><td style="width:80px;color:#64748b;"><b>订单号：</b></td><td style="font-family:monospace;color:#4f46e5;font-weight:bold;">${order.order_no}</td></tr>
+          <tr><td style="color:#64748b;"><b>商品规格：</b></td><td style="color:#1e293b;font-weight:bold;">${order.region}</td></tr>
+          <tr><td style="color:#64748b;"><b>付款金额：</b></td><td style="color:#059669;font-weight:bold;font-size:16px;">￥${order.price}</td></tr>
+          <tr><td style="color:#64748b;"><b>买家联系：</b></td><td>${order.contact || '未填'}</td></tr>
+          <tr><td style="color:#64748b;"><b>付款备注：</b></td><td>${safeNote}</td></tr>
+        </table>
+        <div style="margin-top:16px;text-align:center;">
+          <a href="${origin}/admin" style="display:inline-block;padding:10px 24px;background:#4f46e5;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:bold;font-size:14px;">👉 进入手机后台一键出卡</a>
+        </div>
+      </div>
+    `;
+
+    await fetch("https://www.pushplus.plus/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: token,
+        title: `🔔【新订单付款】${order.region} ￥${order.price}`,
+        content: content,
+        template: "html"
+      })
+    });
+  } catch(e) {
+    console.error("微信推送异常:", e);
+  }
 }
 
 /**
@@ -966,13 +1183,23 @@ function getFrontendHTML(env) {
       copyText(currentFullCarmi, "完整账号密码已复制！");
     }
 
+    var globalDefaultPrice = "4.99";
+    var globalCategoryPrices = {};
+
+    function updateDisplayPriceForRegion(region) {
+      var price = globalCategoryPrices[region] || globalDefaultPrice;
+      var pEl = document.getElementById("display-price");
+      if (pEl) pEl.innerText = "￥" + parseFloat(price).toFixed(2);
+    }
+
     async function loadStats() {
       try {
         var res = await fetch("/api/stats");
         var json = await res.json();
         if (json.code === 0) {
           loadedRegions = json.data;
-          document.getElementById("display-price").innerText = "￥" + json.price;
+          globalDefaultPrice = json.price || "4.99";
+          globalCategoryPrices = json.category_prices || {};
           if (json.pay_qrcode) document.getElementById("pay-qr-img").src = json.pay_qrcode;
           if (json.site_name) {
             document.title = json.site_name + " - 自动发卡网";
@@ -1101,13 +1328,18 @@ function getFrontendHTML(env) {
       container.innerHTML = "";
       loadedRegions.forEach(function(r, idx) {
         var isSelected = r.region === currentSelectedRegion || (idx === 0 && !currentSelectedRegion);
-        if (isSelected) currentSelectedRegion = r.region;
+        if (isSelected) {
+          currentSelectedRegion = r.region;
+          updateDisplayPriceForRegion(r.region);
+        }
 
+        var priceForThis = globalCategoryPrices[r.region] || globalDefaultPrice;
         var card = document.createElement("div");
         card.className = "p-4 rounded-xl border cursor-pointer transition duration-150 flex flex-col justify-between " + 
                          (isSelected ? "card-active border-indigo-500" : "border-slate-700/80 bg-slate-800/40 hover:border-slate-600");
         card.onclick = function() {
           currentSelectedRegion = r.region;
+          updateDisplayPriceForRegion(r.region);
           renderRegions();
         };
 
@@ -1117,7 +1349,10 @@ function getFrontendHTML(env) {
               '余量: ' + r.stock +
             '</span>' +
           '</div>' +
-          '<div class="text-xs text-slate-400">已售: ' + r.sold + '</div>';
+          '<div class="flex items-center justify-between text-xs text-slate-400">' +
+            '<span>已售: ' + r.sold + '</span>' +
+            '<span class="text-emerald-400 font-bold font-mono">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+          '</div>';
         container.appendChild(card);
       });
     }
@@ -1339,13 +1574,22 @@ function getAdminHTML(env) {
   </style>
 </head>
 <body class="p-4 max-w-2xl mx-auto pb-16">
-  <div class="mb-5 flex justify-between items-center border-b border-slate-800 pb-3">
+  <!-- 顶部导航栏 -->
+  <div class="mb-4 flex justify-between items-center border-b border-slate-800 pb-3">
     <h1 class="text-lg font-bold flex items-center gap-2 text-indigo-400">
       <i class="fa-solid fa-shield-halved"></i> 站长手机工作台
     </h1>
-    <a href="/" class="text-xs text-slate-400 hover:text-white flex items-center gap-1">
-      <i class="fa-solid fa-arrow-left"></i> 前台首页
-    </a>
+    <div class="flex items-center gap-2 text-xs">
+      <button onclick="toggleSound()" id="btn-sound" class="px-2.5 py-1 rounded-lg bg-slate-800 text-emerald-400 hover:bg-slate-700 flex items-center gap-1">
+        <i class="fa-solid fa-volume-high" id="sound-icon"></i> <span id="sound-status">提示音: 开</span>
+      </button>
+      <button onclick="playDingDong()" class="px-2 py-1 rounded-lg bg-slate-800 text-slate-300 hover:text-white" title="试听提示音">
+        <i class="fa-solid fa-play text-[10px]"></i> 试听
+      </button>
+      <a href="/" class="text-xs text-slate-400 hover:text-white flex items-center gap-1 ml-1">
+        <i class="fa-solid fa-arrow-left"></i> 前台
+      </a>
+    </div>
   </div>
 
   <div class="space-y-4">
@@ -1357,7 +1601,7 @@ function getAdminHTML(env) {
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-400">
         <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-        <span>4秒自动刷新中</span>
+        <span>4秒自动监听新订单</span>
       </div>
     </div>
 
@@ -1367,9 +1611,14 @@ function getAdminHTML(env) {
         <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
           <i class="fa-solid fa-bell"></i> 待确认收款发货订单
         </h2>
-        <span id="pending-count-badge" class="text-xs px-2.5 py-0.5 rounded-full font-bold bg-slate-800 text-slate-400">
-          0 笔
-        </span>
+        <div class="flex items-center gap-2">
+          <span id="pending-count-badge" class="text-xs px-2.5 py-0.5 rounded-full font-bold bg-slate-800 text-slate-400">
+            0 笔
+          </span>
+          <button onclick="clearExpiredOrders()" class="text-[11px] text-slate-500 hover:text-rose-400 transition" title="清理24小时未付款废单">
+            <i class="fa-solid fa-broom"></i> 清理废单
+          </button>
+        </div>
       </div>
       
       <div id="pending-list" class="space-y-3">
@@ -1390,7 +1639,7 @@ function getAdminHTML(env) {
       <div class="space-y-2">
         <div class="flex items-center justify-between text-xs">
           <label class="font-medium text-slate-300 flex items-center gap-1">
-            <i class="fa-solid fa-tag text-emerald-400"></i> 设置账号销售单价 (元)
+            <i class="fa-solid fa-tag text-emerald-400"></i> 设置统一基准单价 (元)
           </label>
           <span class="text-emerald-400 font-mono text-[11px]" id="current-price-badge">当前价格: ￥4.99</span>
         </div>
@@ -1416,7 +1665,47 @@ function getAdminHTML(env) {
         </div>
       </div>
 
-      <!-- 2. 设置网站标题 -->
+      <!-- 1.5. 各品类独立差异化定价管理 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-layer-group text-indigo-400"></i> 各品类专属定价 (留空则继承基准价)
+          </label>
+          <button type="button" onclick="addCustomCategoryPriceRow()" class="text-[11px] text-indigo-400 hover:text-indigo-300 font-medium">
+            <i class="fa-solid fa-plus"></i> 新增品类定价
+          </button>
+        </div>
+        <div id="category-price-table" class="space-y-1.5">
+          <div class="text-slate-500 text-xs py-1 text-center">正在加载品类列表...</div>
+        </div>
+        <div class="pt-1 flex justify-end">
+          <button onclick="saveCategoryPrices()" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1">
+            <i class="fa-solid fa-floppy-disk"></i> 保存所有品类定价
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. 微信公众号 / PushPlus 免费来单推送 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-brands fa-weixin text-emerald-400"></i> 微信来单推送 Token (PushPlus)
+          </label>
+          <a href="https://www.pushplus.plus" target="_blank" class="text-[11px] text-indigo-400 hover:underline">免费获取Token</a>
+        </div>
+        <div class="flex gap-2">
+          <input type="text" id="pushplus-token-input" placeholder="粘贴 PushPlus 的 Token (选填)" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
+          <button onclick="savePushPlusToken()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+            <i class="fa-solid fa-floppy-disk"></i> 保存
+          </button>
+          <button onclick="testPushPlus()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg shrink-0" title="发送一条测试通知">
+            测试
+          </button>
+        </div>
+        <p class="text-[10px] text-slate-500">配置后，买家扫码付款时系统将自动推送到您的个人微信，无需一直守在网页前！</p>
+      </div>
+
+      <!-- 3. 设置网站标题 -->
       <div class="space-y-2 pt-2 border-t border-slate-800/80">
         <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
           <i class="fa-solid fa-heading text-indigo-400"></i> 网站前台标题名称
@@ -1429,7 +1718,7 @@ function getAdminHTML(env) {
         </div>
       </div>
 
-      <!-- 3. 设置微信收款码 -->
+      <!-- 4. 设置微信收款码 -->
       <div class="space-y-2 pt-2 border-t border-slate-800/80">
         <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
           <i class="fa-solid fa-qrcode text-emerald-400"></i> 微信收款二维码图片
@@ -1449,22 +1738,28 @@ function getAdminHTML(env) {
       </div>
     </div>
 
-    <!-- 手动批量导入卡密 -->
-    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-      <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
-        <i class="fa-solid fa-file-import"></i> 批量导入卡密 (备用库存)
-      </h2>
+    <!-- 批量导入卡密 (支持自定义多品类) -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
+      <div class="flex justify-between items-center">
+        <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-file-import"></i> 批量导入卡密 (支持新增任意品类)
+        </h2>
+      </div>
       <div class="space-y-2">
-        <div class="flex gap-2">
-          <select id="import-region" class="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
-            <option value="美国">美国</option>
-            <option value="香港">香港</option>
-            <option value="日本">日本</option>
-            <option value="台湾">台湾</option>
-            <option value="通用">通用</option>
-          </select>
-          <button onclick="importCarmis()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs">
-            导入
+        <div class="flex flex-col sm:flex-row gap-2">
+          <div class="flex-1 flex gap-1.5">
+            <select id="import-region-select" onchange="onRegionSelectChange(this.value)" class="px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+              <option value="美国">美国</option>
+              <option value="香港">香港</option>
+              <option value="日本">日本</option>
+              <option value="台湾">台湾</option>
+              <option value="通用">通用</option>
+              <option value="__custom__">+ 自定义品类名称</option>
+            </select>
+            <input type="text" id="import-region-custom" placeholder="输入自定义品类名(如ChatGPT)" class="hidden flex-1 px-2.5 py-1.5 rounded-lg bg-slate-800 border border-indigo-500 text-xs text-white">
+          </div>
+          <button onclick="importCarmis()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1">
+            <i class="fa-solid fa-upload"></i> 导入卡密
           </button>
         </div>
         <textarea id="import-text" rows="2" placeholder="一行一条卡密，例如：&#10;账号: xxx@outlook.com ---- 密码: xxx" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-white"></textarea>
@@ -1482,6 +1777,89 @@ function getAdminHTML(env) {
     var savedKey = localStorage.getItem("faka_admin_key");
     if (savedKey) {
       document.getElementById("admin-key").value = savedKey;
+    }
+
+    var soundEnabled = localStorage.getItem("faka_sound_enabled") !== "false";
+    updateSoundBtnUI();
+
+    var lastPendingCount = 0;
+    var audioCtx = null;
+
+    function updateSoundBtnUI() {
+      var icon = document.getElementById("sound-icon");
+      var txt = document.getElementById("sound-status");
+      var btn = document.getElementById("btn-sound");
+      if (soundEnabled) {
+        if (icon) icon.className = "fa-solid fa-volume-high";
+        if (txt) txt.innerText = "提示音: 开";
+        if (btn) btn.className = "px-2.5 py-1 rounded-lg bg-slate-800 text-emerald-400 hover:bg-slate-700 flex items-center gap-1";
+      } else {
+        if (icon) icon.className = "fa-solid fa-volume-xmark";
+        if (txt) txt.innerText = "提示音: 关";
+        if (btn) btn.className = "px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:bg-slate-700 flex items-center gap-1";
+      }
+    }
+
+    function toggleSound() {
+      soundEnabled = !soundEnabled;
+      localStorage.setItem("faka_sound_enabled", soundEnabled);
+      updateSoundBtnUI();
+      if (soundEnabled) playDingDong();
+    }
+
+    // 纯 Web Audio API 合成真实自然的高品质“叮咚”来单提示音
+    function playDingDong() {
+      try {
+        if (!audioCtx) {
+          var AudioContext = window.AudioContext || window.webkitAudioContext;
+          audioCtx = new AudioContext();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+        var now = audioCtx.currentTime;
+
+        // 叮 (880Hz / A5 音高)
+        var osc1 = audioCtx.createOscillator();
+        var gain1 = audioCtx.createGain();
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(880, now);
+        gain1.gain.setValueAtTime(0.35, now);
+        gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+        osc1.connect(gain1);
+        gain1.connect(audioCtx.destination);
+        osc1.start(now);
+        osc1.stop(now + 0.55);
+
+        // 咚 (659.25Hz / E5 音高)
+        var osc2 = audioCtx.createOscillator();
+        var gain2 = audioCtx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.setValueAtTime(659.25, now + 0.22);
+        gain2.gain.setValueAtTime(0.4, now + 0.22);
+        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.95);
+        osc2.connect(gain2);
+        gain2.connect(audioCtx.destination);
+        osc2.start(now + 0.22);
+        osc2.stop(now + 0.95);
+
+        // 手机震动触发 (双短震)
+        if (navigator.vibrate) {
+          navigator.vibrate([200, 100, 200]);
+        }
+      } catch (e) {
+        console.error("音频播放异常:", e);
+      }
+    }
+
+    function onRegionSelectChange(val) {
+      var customInput = document.getElementById("import-region-custom");
+      if (val === "__custom__") {
+        customInput.classList.remove("hidden");
+        customInput.focus();
+      } else {
+        customInput.classList.add("hidden");
+      }
     }
 
     async function loadAdminData() {
@@ -1507,6 +1885,11 @@ function getAdminHTML(env) {
             if (siteInput && !siteInput.value) siteInput.value = json.site_name;
           }
 
+          if (json.pushplus_token) {
+            var tokenInput = document.getElementById("pushplus-token-input");
+            if (tokenInput && !tokenInput.value) tokenInput.value = json.pushplus_token;
+          }
+
           if (json.qrcode) {
             document.getElementById("current-qrcode-preview").src = json.qrcode;
             document.getElementById("current-qrcode-preview").classList.remove("hidden");
@@ -1522,6 +1905,14 @@ function getAdminHTML(env) {
               pBadge.className = "text-xs px-2.5 py-0.5 rounded-full font-bold bg-slate-800 text-slate-400";
             }
           }
+
+          // 核心特性：检测到新订单增加时，自动播放叮咚提示音与震动
+          if (pendingCount > lastPendingCount) {
+            if (soundEnabled) {
+              playDingDong();
+            }
+          }
+          lastPendingCount = pendingCount;
 
           if (pendingCount === 0) {
             pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-3">✅ 暂无待发货订单</div>';
@@ -1546,6 +1937,10 @@ function getAdminHTML(env) {
             }).join("");
           }
 
+          if (json.categories || json.category_prices) {
+            renderCategoryPriceTable(json.categories, json.category_prices);
+          }
+
           rBox.innerHTML = json.recent.map(function(o) {
             return '<div class="p-2.5 rounded-lg bg-slate-800/60 text-xs border border-slate-700/60 space-y-1">' +
               '<div class="flex justify-between text-slate-400">' +
@@ -1557,6 +1952,65 @@ function getAdminHTML(env) {
           }).join("");
         }
       } catch (e) {}
+    }
+
+    var currentCategories = ["美国", "香港", "日本", "台湾", "通用"];
+    var currentCategoryPrices = {};
+
+    function renderCategoryPriceTable(categories, prices) {
+      if (categories && Array.isArray(categories)) currentCategories = categories;
+      if (prices && typeof prices === 'object') currentCategoryPrices = prices;
+      var container = document.getElementById("category-price-table");
+      if (!container) return;
+
+      var html = currentCategories.map(function(cat) {
+        var p = currentCategoryPrices[cat] || "";
+        return '<div class="flex items-center gap-2 p-1.5 bg-slate-800/60 rounded-lg border border-slate-700/60">' +
+          '<span class="w-24 text-xs font-bold text-slate-200 truncate" title="' + cat + '">' + cat + '</span>' +
+          '<div class="relative flex-1">' +
+            '<span class="absolute left-2.5 top-1.5 text-slate-400 text-xs">￥</span>' +
+            '<input type="number" step="0.01" data-cat="' + cat + '" value="' + p + '" placeholder="默认基准价" class="cat-price-input w-full pl-6 pr-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
+          '</div>' +
+        '</div>';
+      }).join("");
+
+      container.innerHTML = html;
+    }
+
+    function addCustomCategoryPriceRow() {
+      var catName = prompt("请输入新品类名称（例如：ChatGPT、Netflix、土耳其ID 等）：");
+      if (!catName || !catName.trim()) return;
+      catName = catName.trim();
+      if (currentCategories.indexOf(catName) === -1) {
+        currentCategories.push(catName);
+      }
+      renderCategoryPriceTable(currentCategories, currentCategoryPrices);
+    }
+
+    async function saveCategoryPrices() {
+      var key = document.getElementById("admin-key").value.trim();
+      var inputs = document.querySelectorAll(".cat-price-input");
+      var newMap = {};
+      inputs.forEach(function(inp) {
+        var cat = inp.dataset.cat;
+        var val = inp.value.trim();
+        if (cat && val && parseFloat(val) > 0) {
+          newMap[cat] = parseFloat(val).toFixed(2);
+        }
+      });
+
+      try {
+        var res = await fetch("/api/admin/set_category_prices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, category_prices: newMap })
+        });
+        var json = await res.json();
+        alert(json.msg || "品类定价保存成功");
+        loadAdminData();
+      } catch (e) {
+        alert("保存失败");
+      }
     }
 
     function setQuickPrice(val) {
@@ -1624,6 +2078,63 @@ function getAdminHTML(env) {
       }
     }
 
+    async function savePushPlusToken() {
+      var key = document.getElementById("admin-key").value.trim();
+      var token = document.getElementById("pushplus-token-input").value.trim();
+
+      try {
+        var res = await fetch("/api/admin/set_pushplus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, token: token })
+        });
+        var json = await res.json();
+        alert(json.msg || "Token 保存成功");
+        loadAdminData();
+      } catch(e) {
+        alert("保存失败");
+      }
+    }
+
+    async function testPushPlus() {
+      var key = document.getElementById("admin-key").value.trim();
+      var token = document.getElementById("pushplus-token-input").value.trim();
+      if (!token) return alert("请先在输入框填入 PushPlus Token！");
+
+      try {
+        var res = await fetch("/api/admin/test_pushplus", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, token: token })
+        });
+        var json = await res.json();
+        alert(json.msg || "请求完成");
+        if (json.code === 0) {
+          loadAdminData();
+        }
+      } catch(e) {
+        alert("测试失败: " + e.message);
+      }
+    }
+
+    async function clearExpiredOrders() {
+      var key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确定要清理所有超过 24 小时未付款的无效废单吗？")) return;
+
+      try {
+        var res = await fetch("/api/admin/clear_expired", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key })
+        });
+        var json = await res.json();
+        alert(json.msg || "清理完成");
+        loadAdminData();
+      } catch(e) {
+        alert("清理失败");
+      }
+    }
+
     async function uploadQrcode() {
       var fileInput = document.getElementById("qrcode-file-input");
       var key = document.getElementById("admin-key").value.trim();
@@ -1674,7 +2185,13 @@ function getAdminHTML(env) {
 
     async function importCarmis() {
       var key = document.getElementById("admin-key").value.trim();
-      var region = document.getElementById("import-region").value;
+      var selectVal = document.getElementById("import-region-select").value;
+      var region = selectVal;
+      if (selectVal === "__custom__") {
+        region = document.getElementById("import-region-custom").value.trim();
+        if (!region) return alert("请输入自定义品类名称");
+      }
+
       var text = document.getElementById("import-text").value.trim();
       if (!text) return alert("请输入要导入的卡密内容");
 
@@ -1694,7 +2211,7 @@ function getAdminHTML(env) {
     }
 
     loadAdminData();
-    var adminPollTimer = setInterval(loadAdminData, 5000);
+    var adminPollTimer = setInterval(loadAdminData, 4000);
 
     // 智能节流：离开页面/锁屏时自动停止请求，切回页面时立即刷新并恢复
     document.addEventListener("visibilitychange", function() {
@@ -1702,7 +2219,7 @@ function getAdminHTML(env) {
         if (adminPollTimer) clearInterval(adminPollTimer);
       } else {
         loadAdminData();
-        adminPollTimer = setInterval(loadAdminData, 5000);
+        adminPollTimer = setInterval(loadAdminData, 4000);
       }
     });
   </script>
