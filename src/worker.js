@@ -212,48 +212,29 @@ export default {
           }, corsHeaders);
         }
 
-        // 检查后台设置的核销模式 (0=XPay精准金额极速核销模式, 1=严格到账池验资模式)
-        let isStrictMode = false;
-        try {
-          const strictSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'STRICT_VERIFY'").first();
-          if (strictSetting && strictSetting.value === "1") isStrictMode = true;
-        } catch (e) {}
-
-        let matchedTradeNo = tradeNo || ("XPay-￥" + Number(order.price).toFixed(2));
-
-        // 如果开启了严格验资模式，必须在 payments 真实到账池中查找到对应流水记录
-        if (isStrictMode) {
-          let paymentRecord = null;
-          if (tradeNo && tradeNo.length >= 4) {
-            paymentRecord = await env.DB.prepare(
-              "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
-            ).bind(`%${tradeNo}`, tradeNo).first();
-          }
-          if (!paymentRecord) {
-            paymentRecord = await env.DB.prepare(
-              "SELECT id, trade_no, amount, status FROM payments WHERE ABS(amount - ?) < 0.005 AND status = 0 AND created_at > datetime('now', '-10 minutes') ORDER BY id DESC LIMIT 1"
-            ).bind(order.price).first();
-          }
-
-          if (!paymentRecord) {
-            return jsonResponse({
-              code: -1,
-              msg: `❌ 未匹配到 ￥${Number(order.price).toFixed(2)} 的微信真实到账记录！\n请确认您已按【精准金额 ￥${Number(order.price).toFixed(2)}】付款，如刚付完请等待几秒同步。`
-            }, corsHeaders);
-          }
-
-          matchedTradeNo = paymentRecord.trade_no || matchedTradeNo;
-          await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
-        } else {
-          // XPay 极速模式：自动将到账池中匹配的流水标记核销
-          try {
-            await env.DB.prepare(`
-              UPDATE payments 
-              SET status = 1, order_no = ?, used_at = datetime('now') 
-              WHERE (ABS(amount - ?) < 0.005 OR (trade_no LIKE ? AND ? != '')) AND status = 0
-            `).bind(orderNo, order.price, `%${tradeNo}`, tradeNo).run();
-          } catch(e) {}
+        // 查找真实到账池中是否有匹配的微信流水记录 (按单号后4位或精准浮动金额)
+        let paymentRecord = null;
+        if (tradeNo && tradeNo.length >= 4) {
+          paymentRecord = await env.DB.prepare(
+            "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
+          ).bind(`%${tradeNo}`, tradeNo).first();
         }
+        if (!paymentRecord) {
+          // 按精准浮动金额匹配最近 10 分钟内未被使用的真实到账流水
+          paymentRecord = await env.DB.prepare(
+            "SELECT id, trade_no, amount, status FROM payments WHERE ABS(amount - ?) < 0.005 AND status = 0 AND created_at > datetime('now', '-10 minutes') ORDER BY id DESC LIMIT 1"
+          ).bind(order.price).first();
+        }
+
+        if (!paymentRecord) {
+          return jsonResponse({
+            code: -1,
+            msg: `❌ 未检测到 ￥${Number(order.price).toFixed(2)} 的微信到账记录！\n请确认您已微信扫码精准支付 ￥${Number(order.price).toFixed(2)}。\n若刚完成付款，请稍等 3~5 秒待系统同步后重试。`
+          }, corsHeaders);
+        }
+
+        const matchedTradeNo = paymentRecord.trade_no || ("微信支付-￥" + Number(order.price).toFixed(2));
+        await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
 
         // 实时穿透请求原网页抓取最新账号
         console.log(`⚡ XPay 核验通过 (订单 ${orderNo}, 单号 ${matchedTradeNo})，正在实时从原网页获取最新账号...`);
