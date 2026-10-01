@@ -445,6 +445,61 @@ export default {
         }, corsHeaders);
       }
 
+      // 路由 6.4: 管理员后台 - AI 智能生成商品封面
+      if (path === "/api/admin/generate_ai_cover" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const region = (body.region || "通用").trim();
+        let promptKeyword = region;
+        if (region.includes("美国")) promptKeyword = "Apple ID USA App Store rocket shadowrocket sleek modern 3d icon badge";
+        else if (region.includes("香港")) promptKeyword = "Apple ID Hong Kong App Store sleek modern 3d icon badge";
+        else if (region.includes("日本")) promptKeyword = "Apple ID Japan App Store anime aesthetic sleek 3d icon badge";
+        else if (region.includes("台湾")) promptKeyword = "Apple ID Taiwan App Store modern 3d icon badge";
+        else if (region.toLowerCase().includes("chatgpt") || region.toLowerCase().includes("gpt")) promptKeyword = "ChatGPT OpenAI glowing neon purple AI robot brain futuristic 3d icon";
+        else if (region.toLowerCase().includes("netflix") || region.includes("奈飞")) promptKeyword = "Netflix 4K Ultra HD luxury cinema dark gold 3d icon";
+        else if (region.toLowerCase().includes("muse")) promptKeyword = "Muse AI creative digital art studio generative neon 3d icon";
+        else if (region === "通用") promptKeyword = "Shadowrocket rocket launch high speed VPN 3d app icon";
+        else promptKeyword = `${region} digital product software premium 3d badge logo icon`;
+
+        const seed = Math.floor(Math.random() * 999999);
+        const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptKeyword)}?width=400&height=400&nologo=true&seed=${seed}&enhance=true`;
+
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 6000);
+          const aiRes = await fetch(pollinationsUrl, { signal: controller.signal });
+          clearTimeout(timeoutId);
+
+          if (aiRes.ok) {
+            const arrayBuffer = await aiRes.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            const base64 = btoa(binary);
+            const mime = aiRes.headers.get("content-type") || "image/jpeg";
+            const dataUrl = `data:${mime};base64,${base64}`;
+
+            return jsonResponse({
+              code: 0,
+              msg: `✨ AI 已成功为【${region}】生成专属封面图片！`,
+              image_url: dataUrl
+            }, corsHeaders);
+          }
+        } catch(e) {}
+
+        return jsonResponse({
+          code: 0,
+          msg: `✨ AI 已为【${region}】生成专属封面！`,
+          image_url: pollinationsUrl
+        }, corsHeaders);
+      }
+
       // 路由 6.5: 管理员后台 - 修改网站名称
       if (path === "/api/admin/set_site_name" && request.method === "POST") {
         const body = await request.json();
@@ -1669,24 +1724,45 @@ function getAdminHTML(env) {
       </div>
     </div>
 
-    <!-- 待发货订单列表 (核心功能) -->
+    <!-- 📋 订单处理与发货工作台 (三大分类清晰管理) -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
-      <div class="flex justify-between items-center">
-        <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
-          <i class="fa-solid fa-bell"></i> 待确认收款发货订单
+      <div class="flex justify-between items-center border-b border-slate-800 pb-2">
+        <h2 class="font-bold text-white flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-clipboard-list text-indigo-400"></i> 订单分类工作台
         </h2>
-        <div class="flex items-center gap-2">
-          <span id="pending-count-badge" class="text-xs px-2.5 py-0.5 rounded-full font-bold bg-slate-800 text-slate-400">
-            0 笔
-          </span>
-          <button onclick="clearExpiredOrders()" class="text-[11px] text-slate-500 hover:text-rose-400 transition" title="清理24小时未付款废单">
-            <i class="fa-solid fa-broom"></i> 清理废单
-          </button>
-        </div>
+        <button onclick="clearExpiredOrders()" class="text-[11px] text-slate-500 hover:text-rose-400 transition flex items-center gap-1" title="清理24小时未付款废单">
+          <i class="fa-solid fa-broom"></i> 清理24h废单
+        </button>
       </div>
-      
-      <div id="pending-list" class="space-y-3">
-        <div class="text-slate-500 text-xs py-3 text-center">加载中...</div>
+
+      <!-- 三大分类 Tabs -->
+      <div class="grid grid-cols-3 gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800 text-xs font-bold text-center">
+        <button id="order-tab-paid" onclick="switchOrderTab('paid')" class="py-2 rounded-lg bg-emerald-600 text-white flex items-center justify-center gap-1.5 shadow transition">
+          <i class="fa-solid fa-bell"></i> 
+          <span>买家已付款</span>
+          <span id="badge-paid-count" class="px-1.5 py-0.2 rounded-full bg-white/20 text-white text-[10px]">0</span>
+        </button>
+        <button id="order-tab-unpaid" onclick="switchOrderTab('unpaid')" class="py-2 rounded-lg text-slate-400 hover:text-white flex items-center justify-center gap-1.5 transition">
+          <i class="fa-solid fa-clock"></i> 
+          <span>仅下单未付</span>
+          <span id="badge-unpaid-count" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-400 text-[10px]">0</span>
+        </button>
+        <button id="order-tab-done" onclick="switchOrderTab('done')" class="py-2 rounded-lg text-slate-400 hover:text-white flex items-center justify-center gap-1.5 transition">
+          <i class="fa-solid fa-circle-check"></i> 
+          <span>已成交发卡</span>
+          <span id="badge-done-count" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-400 text-[10px]">0</span>
+        </button>
+      </div>
+
+      <!-- 分类列表容器 -->
+      <div id="order-panel-paid" class="space-y-3">
+        <div class="text-slate-500 text-xs py-3 text-center">正在加载待发货订单...</div>
+      </div>
+      <div id="order-panel-unpaid" class="space-y-3 hidden">
+        <div class="text-slate-500 text-xs py-3 text-center">正在加载未付款订单...</div>
+      </div>
+      <div id="order-panel-done" class="space-y-3 hidden">
+        <div class="text-slate-500 text-xs py-3 text-center">正在加载已发卡记录...</div>
       </div>
     </div>
 
@@ -1830,12 +1906,6 @@ function getAdminHTML(env) {
         <textarea id="import-text" rows="2" placeholder="一行一条卡密，例如：&#10;账号: xxx@outlook.com ---- 密码: xxx" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-white"></textarea>
       </div>
     </div>
-
-    <!-- 最近已出卡记录 -->
-    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-      <h2 class="font-bold text-slate-300 text-sm">最近发卡记录</h2>
-      <div id="recent-list" class="space-y-2"></div>
-    </div>
   </div>
 
   <script>
@@ -1927,15 +1997,53 @@ function getAdminHTML(env) {
       }
     }
 
+    var currentOrderTab = 'paid';
+
+    function switchOrderTab(tab) {
+      currentOrderTab = tab;
+      var btnPaid = document.getElementById("order-tab-paid");
+      var btnUnpaid = document.getElementById("order-tab-unpaid");
+      var btnDone = document.getElementById("order-tab-done");
+
+      var panelPaid = document.getElementById("order-panel-paid");
+      var panelUnpaid = document.getElementById("order-panel-unpaid");
+      var panelDone = document.getElementById("order-panel-done");
+
+      // 重置所有 tab 按钮样式
+      if (btnPaid) btnPaid.className = "py-2 rounded-lg text-slate-400 hover:text-white flex items-center justify-center gap-1.5 transition";
+      if (btnUnpaid) btnUnpaid.className = "py-2 rounded-lg text-slate-400 hover:text-white flex items-center justify-center gap-1.5 transition";
+      if (btnDone) btnDone.className = "py-2 rounded-lg text-slate-400 hover:text-white flex items-center justify-center gap-1.5 transition";
+
+      // 隐藏所有面板
+      if (panelPaid) panelPaid.classList.add("hidden");
+      if (panelUnpaid) panelUnpaid.classList.add("hidden");
+      if (panelDone) panelDone.classList.add("hidden");
+
+      if (tab === 'paid') {
+        if (btnPaid) btnPaid.className = "py-2 rounded-lg bg-emerald-600 text-white flex items-center justify-center gap-1.5 shadow transition";
+        if (panelPaid) panelPaid.classList.remove("hidden");
+      } else if (tab === 'unpaid') {
+        if (btnUnpaid) btnUnpaid.className = "py-2 rounded-lg bg-indigo-600 text-white flex items-center justify-center gap-1.5 shadow transition";
+        if (panelUnpaid) panelUnpaid.classList.remove("hidden");
+      } else if (tab === 'done') {
+        if (btnDone) btnDone.className = "py-2 rounded-lg bg-slate-700 text-white flex items-center justify-center gap-1.5 shadow transition";
+        if (panelDone) panelDone.classList.remove("hidden");
+      }
+    }
+
     async function loadAdminData() {
       var keyInput = document.getElementById("admin-key");
       var key = (keyInput ? keyInput.value.trim() : "") || "51245124";
       if (keyInput) keyInput.value = key;
       localStorage.setItem("faka_admin_key", key);
 
-      var pBox = document.getElementById("pending-list");
-      var rBox = document.getElementById("recent-list");
-      var pBadge = document.getElementById("pending-count-badge");
+      var panelPaid = document.getElementById("order-panel-paid");
+      var panelUnpaid = document.getElementById("order-panel-unpaid");
+      var panelDone = document.getElementById("order-panel-done");
+
+      var badgePaid = document.getElementById("badge-paid-count");
+      var badgeUnpaid = document.getElementById("badge-unpaid-count");
+      var badgeDone = document.getElementById("badge-done-count");
       var pollTxt = document.getElementById("poll-status-text");
 
       try {
@@ -1969,62 +2077,124 @@ function getAdminHTML(env) {
             document.getElementById("no-qrcode-text").classList.add("hidden");
           }
 
-          var pendingCount = (json.pending || []).length;
-          if (pBadge) {
-            pBadge.innerText = pendingCount + " 笔待发";
-            if (pendingCount > 0) {
-              pBadge.className = "text-xs px-2.5 py-0.5 rounded-full font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 pending-alert";
+          // 核心分类逻辑：严格拆分【买家已提交付款】与【仅下单未付款】
+          var allPending = json.pending || [];
+          var paidOrders = [];
+          var unpaidOrders = [];
+
+          allPending.forEach(function(o) {
+            var pType = (o.pay_type || "").trim();
+            if (pType.indexOf("买家已") !== -1 || pType.indexOf("已付款") !== -1 || pType.indexOf("付款申请") !== -1) {
+              paidOrders.push(o);
             } else {
-              pBadge.className = "text-xs px-2.5 py-0.5 rounded-full font-bold bg-slate-800 text-slate-400";
+              unpaidOrders.push(o);
+            }
+          });
+
+          var doneOrders = json.recent || [];
+
+          // 更新三大分类数量徽章
+          if (badgePaid) {
+            badgePaid.innerText = paidOrders.length;
+            if (paidOrders.length > 0) {
+              badgePaid.className = "px-1.5 py-0.2 rounded-full bg-rose-500 text-white font-bold animate-pulse text-[10px]";
+            } else {
+              badgePaid.className = "px-1.5 py-0.2 rounded-full bg-white/20 text-white text-[10px]";
             }
           }
+          if (badgeUnpaid) badgeUnpaid.innerText = unpaidOrders.length;
+          if (badgeDone) badgeDone.innerText = doneOrders.length;
 
-          // 核心特性：检测到新订单增加时，自动播放叮咚提示音与震动
-          if (pendingCount > lastPendingCount) {
+          // 核心来单提醒：当有新的“买家已付款”时触发叮咚提示音与双短震
+          if (paidOrders.length > lastPendingCount) {
             if (soundEnabled) {
               playDingDong();
             }
           }
-          lastPendingCount = pendingCount;
+          lastPendingCount = paidOrders.length;
 
-          if (pendingCount === 0) {
-            pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-3">✅ 暂无待发货订单</div>';
-          } else {
-            pBox.innerHTML = json.pending.map(function(o) {
-              return '<div class="p-3.5 rounded-xl bg-slate-800/90 border border-amber-500/40 space-y-2 shadow-lg">' +
-                '<div class="flex justify-between items-center text-xs">' +
-                  '<span class="font-mono text-white font-bold">' + o.order_no + '</span>' +
-                  '<span class="px-2 py-0.5 bg-indigo-500/20 text-indigo-300 font-bold rounded">' + o.region + ' · ￥' + o.price + '</span>' +
-                '</div>' +
-                '<div class="text-xs text-amber-300 font-medium bg-slate-900 p-2 rounded-lg border border-slate-700 flex justify-between items-center">' +
-                  '<span><i class="fa-solid fa-user-tag text-indigo-400 mr-1"></i> ' + (o.pay_type || '买家已扫码待发') + '</span>' +
-                  '<span class="text-slate-400 text-[11px]">' + (o.contact ? '联系:' + o.contact : '') + '</span>' +
-                '</div>' +
-                '<div class="flex justify-between items-center pt-1">' +
-                  '<span class="text-[11px] text-slate-400">' + o.created_at + '</span>' +
-                  '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-bold rounded-lg text-xs shadow-lg flex items-center gap-1.5 transition">' +
-                    '<i class="fa-solid fa-check"></i> 确认收款并出卡' +
-                  '</button>' +
-                '</div>' +
+          // 1. 渲染【买家已付款待发货】面板
+          if (panelPaid) {
+            if (paidOrders.length === 0) {
+              panelPaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-6 bg-slate-950/60 rounded-xl border border-slate-800">' +
+                '<i class="fa-solid fa-circle-check text-emerald-400 text-base mb-1 block"></i>' +
+                '暂无待发货订单，所有买家付款均已处理出库！' +
               '</div>';
-            }).join("");
+            } else {
+              panelPaid.innerHTML = paidOrders.map(function(o) {
+                return '<div class="p-3.5 rounded-xl bg-slate-800 border-2 border-emerald-500/80 space-y-2.5 shadow-xl">' +
+                  '<div class="flex justify-between items-center text-xs">' +
+                    '<span class="font-mono text-white font-bold flex items-center gap-1.5">' +
+                      '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>' +
+                      '单号: ' + o.order_no +
+                    '</span>' +
+                    '<span class="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-bold rounded border border-emerald-500/40">' + 
+                      o.region + ' · ￥' + o.price + 
+                    '</span>' +
+                  '</div>' +
+                  '<div class="text-xs text-emerald-300 font-medium bg-slate-950 p-2.5 rounded-lg border border-slate-700 space-y-1">' +
+                    '<div class="flex justify-between items-center">' +
+                      '<span class="font-bold text-amber-300"><i class="fa-solid fa-comment-dollar mr-1"></i> ' + (o.pay_type || '买家已扫码') + '</span>' +
+                      '<span class="text-slate-400 font-mono text-[11px]">' + (o.contact ? '联系方式: ' + o.contact : '无联系方式') + '</span>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="flex justify-between items-center pt-0.5">' +
+                    '<span class="text-[11px] text-slate-400 font-mono">' + o.created_at + '</span>' +
+                    '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-xl text-xs shadow-lg flex items-center gap-1.5 transition transform active:scale-95">' +
+                      '<i class="fa-solid fa-bolt"></i> 确认已收款，立即出卡' +
+                    '</button>' +
+                  '</div>' +
+                '</div>';
+              }).join("");
+            }
+          }
+
+          // 2. 渲染【仅下单未付款】面板
+          if (panelUnpaid) {
+            if (unpaidOrders.length === 0) {
+              panelUnpaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无未付款订单</div>';
+            } else {
+              panelUnpaid.innerHTML = unpaidOrders.map(function(o) {
+                return '<div class="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-1.5 text-xs">' +
+                  '<div class="flex justify-between items-center">' +
+                    '<span class="font-mono text-slate-300">' + o.order_no + '</span>' +
+                    '<span class="text-indigo-300 font-medium">' + o.region + ' · ￥' + o.price + '</span>' +
+                  '</div>' +
+                  '<div class="flex justify-between items-center text-slate-400 text-[11px] pt-1 border-t border-slate-700/40">' +
+                    '<span>下单: ' + o.created_at + ' (' + (o.contact || '无联系') + ')</span>' +
+                    '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-2.5 py-1 bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white rounded text-[11px] font-medium transition">' +
+                      '直接出卡' +
+                    '</button>' +
+                  '</div>' +
+                '</div>';
+              }).join("");
+            }
+          }
+
+          // 3. 渲染【已成交出卡】面板
+          if (panelDone) {
+            if (doneOrders.length === 0) {
+              panelDone.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无已发卡记录</div>';
+            } else {
+              panelDone.innerHTML = doneOrders.map(function(o) {
+                return '<div class="p-3 rounded-xl bg-slate-800/80 text-xs border border-slate-700/80 space-y-2">' +
+                  '<div class="flex justify-between items-center text-slate-400">' +
+                    '<span class="font-mono font-bold text-white">' + o.order_no + ' (' + o.region + ')</span>' +
+                    '<span class="text-emerald-400 font-mono text-[11px]">' + (o.paid_at || '') + '</span>' +
+                  '</div>' +
+                  '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-2 rounded-lg border border-slate-800">' + 
+                    (o.carmi || '已核销发卡') + 
+                  '</div>' +
+                '</div>';
+              }).join("");
+            }
           }
 
           if (json.categories || json.category_prices || json.category_images) {
             renderCategoryPriceTable(json.categories, json.category_prices, json.category_images);
           }
-
-          rBox.innerHTML = (json.recent || []).map(function(o) {
-            return '<div class="p-2.5 rounded-lg bg-slate-800/60 text-xs border border-slate-700/60 space-y-1">' +
-              '<div class="flex justify-between text-slate-400">' +
-                '<span>' + o.order_no + ' (' + o.region + ')</span>' +
-                '<span class="text-emerald-400 font-mono">' + (o.paid_at || '') + '</span>' +
-              '</div>' +
-              '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-1.5 rounded">' + (o.carmi || '已核销') + '</div>' +
-            '</div>';
-          }).join("");
         } else {
-          if (pBox) pBox.innerHTML = '<div class="p-3 bg-rose-950/60 border border-rose-800 rounded-lg text-rose-300 text-xs text-center">⚠️ 访问受限: ' + (json.msg || "密钥错误") + '，请在上方输入正确密钥（默认: 51245124）</div>';
+          if (panelPaid) panelPaid.innerHTML = '<div class="p-3 bg-rose-950/60 border border-rose-800 rounded-lg text-rose-300 text-xs text-center">⚠️ 访问受限: ' + (json.msg || "密钥错误") + '，请在上方输入正确密钥（默认: 51245124）</div>';
         }
       } catch (e) {
         if (pollTxt) pollTxt.innerText = "网络异常重试中...";
@@ -2048,31 +2218,34 @@ function getAdminHTML(env) {
         var encodedCat = encodeURIComponent(cat);
 
         var imgPreview = imgUrl ? 
-          '<img src="' + imgUrl + '" class="w-12 h-12 rounded-lg object-cover border border-indigo-500/40 shrink-0 shadow">' :
-          '<div class="w-12 h-12 rounded-lg bg-slate-950 text-slate-500 flex flex-col items-center justify-center text-[10px] shrink-0 border border-dashed border-slate-700"><i class="fa-solid fa-image text-xs mb-0.5"></i>无封面</div>';
+          '<img src="' + imgUrl + '" class="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow">' :
+          '<div class="w-12 h-12 rounded-xl bg-slate-950 text-slate-500 flex flex-col items-center justify-center text-[10px] shrink-0 border border-dashed border-slate-700"><i class="fa-solid fa-image text-xs mb-0.5"></i>无封面</div>';
 
         var clearBtn = imgUrl ? 
           '<button data-cat="' + encodedCat + '" onclick="clearCategoryImage(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded text-[11px] shrink-0 border border-rose-800/60 transition" title="清除图片"><i class="fa-solid fa-trash-can"></i></button>' : '';
 
-        return '<div class="p-2.5 bg-slate-800/80 rounded-xl border border-slate-700/70 space-y-2">' +
+        return '<div class="p-3 bg-slate-800/80 rounded-xl border border-slate-700/70 space-y-2.5">' +
           '<div class="flex items-center gap-3">' +
             imgPreview +
-            '<div class="flex-1 min-w-0">' +
-              '<div class="flex items-center justify-between mb-1">' +
+            '<div class="flex-1 min-w-0 space-y-1.5">' +
+              '<div class="flex items-center justify-between">' +
                 '<span class="text-xs font-bold text-white truncate">' + cat + '</span>' +
                 '<div class="flex items-center gap-1.5">' +
+                  '<button data-cat="' + encodedCat + '" onclick="aiGenerateCategoryImage(decodeURIComponent(this.dataset.cat), this)" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 text-white font-bold rounded text-[11px] flex items-center gap-1 shadow transition" title="使用 AI 一键为该品类生成专属高清封面">' +
+                    '<i class="fa-solid fa-wand-magic-sparkles"></i> AI生图' +
+                  '</button>' +
                   '<label class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded text-[11px] cursor-pointer flex items-center gap-1 shadow transition">' +
-                    '<i class="fa-solid fa-upload"></i> 上传图片' +
+                    '<i class="fa-solid fa-upload"></i> 上传' +
                     '<input type="file" accept="image/*" class="hidden" data-cat="' + encodedCat + '" onchange="handleCategoryFileUpload(decodeURIComponent(this.dataset.cat), this)">' +
                   '</label>' +
                   '<button data-cat="' + encodedCat + '" onclick="handleCategoryUrlInput(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-slate-900 hover:bg-slate-700 text-slate-300 font-medium rounded text-[11px] flex items-center gap-1 border border-slate-700 transition" title="填入网络图片链接">' +
-                    '<i class="fa-solid fa-link"></i> 填URL' +
+                    '<i class="fa-solid fa-link"></i> URL' +
                   '</button>' +
                   clearBtn +
                 '</div>' +
               '</div>' +
               '<div class="flex items-center gap-2">' +
-                '<span class="text-[11px] text-slate-400 shrink-0">专属单价:</span>' +
+                '<span class="text-[11px] text-slate-400 shrink-0">独立单价:</span>' +
                 '<div class="relative flex-1">' +
                   '<span class="absolute left-2 top-1 text-slate-500 text-xs">￥</span>' +
                   '<input type="number" step="0.01" data-cat="' + encodedCat + '" value="' + p + '" placeholder="留空继承基准价" class="cat-price-input w-full pl-5 pr-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-xs text-emerald-400 font-mono font-bold">' +
@@ -2084,6 +2257,99 @@ function getAdminHTML(env) {
       }).join("");
 
       container.innerHTML = html;
+    }
+
+    // ✨ AI 智能自动生成商品封面配图
+    async function aiGenerateCategoryImage(region, btnEl) {
+      var key = document.getElementById("admin-key").value.trim();
+      var originalHtml = btnEl ? btnEl.innerHTML : "";
+      if (btnEl) {
+        btnEl.disabled = true;
+        btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> AI绘制中...';
+      }
+
+      try {
+        var res = await fetch("/api/admin/generate_ai_cover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, region: region })
+        });
+        var json = await res.json();
+
+        if (json.code === 0 && json.image_url) {
+          // 自动直接保存该 AI 封面
+          var saveRes = await fetch("/api/admin/set_category_image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key: key, region: region, image_url: json.image_url })
+          });
+          var saveJson = await saveRes.json();
+          alert(saveJson.msg || ("🎉 已成功为【" + region + "】生成并应用 AI 封面图片！"));
+          loadAdminData();
+        } else {
+          // 本地 Canvas 高质感 3D 徽标智能兜底生成
+          generateLocalCanvasAiCover(region, key);
+        }
+      } catch (err) {
+        generateLocalCanvasAiCover(region, key);
+      } finally {
+        if (btnEl) {
+          btnEl.disabled = false;
+          btnEl.innerHTML = originalHtml;
+        }
+      }
+    }
+
+    // 智能本地 3D 徽标生成器 (100% 可靠兜底)
+    async function generateLocalCanvasAiCover(region, key) {
+      try {
+        var canvas = document.createElement("canvas");
+        canvas.width = 400;
+        canvas.height = 400;
+        var ctx = canvas.getContext("2d");
+
+        // 渐变背景
+        var grad = ctx.createLinearGradient(0, 0, 400, 400);
+        if (region.indexOf("美国") !== -1 || region.indexOf("香港") !== -1) {
+          grad.addColorStop(0, "#1e1b4b"); grad.addColorStop(1, "#312e81");
+        } else if (region.indexOf("日本") !== -1 || region.indexOf("台湾") !== -1) {
+          grad.addColorStop(0, "#4c0519"); grad.addColorStop(1, "#831843");
+        } else if (region.toLowerCase().indexOf("gpt") !== -1 || region.toLowerCase().indexOf("ai") !== -1) {
+          grad.addColorStop(0, "#022c22"); grad.addColorStop(1, "#065f46");
+        } else {
+          grad.addColorStop(0, "#0f172a"); grad.addColorStop(1, "#1e293b");
+        }
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 400, 400);
+
+        // 装饰光晕
+        ctx.beginPath();
+        ctx.arc(200, 200, 140, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.fill();
+
+        // 核心文字徽标
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 38px -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(region, 200, 185);
+
+        ctx.fillStyle = "#a5b4fc";
+        ctx.font = "bold 18px sans-serif";
+        ctx.fillText("✦ PREMIUM ✦", 200, 235);
+
+        var dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+        await fetch("/api/admin/set_category_image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, region: region, image_url: dataUrl })
+        });
+        alert("🎉 已为【" + region + "】生成专属高质感封面！");
+        loadAdminData();
+      } catch(e) {
+        alert("生成失败，请重试");
+      }
     }
 
     function addCustomCategoryPriceRow() {
