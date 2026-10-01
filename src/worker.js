@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker - 智能自动抓取发卡系统 (支持后台自定义固定金额与收款码上传)
+ * Cloudflare Worker - 智能自动抓取发卡系统 (原生集成 V免签 0成本全自动收款发货)
  */
 
 export default {
@@ -25,7 +25,7 @@ export default {
     }
 
     try {
-      // 路由 1: 获取各地区库存统计及网站配置（读取 D1 中保存的固定金额与收款码）
+      // 路由 1: 获取各地区库存统计及网站配置
       if (path === "/api/stats") {
         const rows = await env.DB.prepare(`
           SELECT region, COUNT(CASE WHEN status = 0 THEN 1 END) as stock, COUNT(CASE WHEN status = 1 THEN 1 END) as sold
@@ -49,7 +49,6 @@ export default {
           }
         }
 
-        // 读取保存在 D1 中的收款码与固定金额
         let qrcode = env.PAY_QRCODE_URL || "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         try {
@@ -69,7 +68,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 2: 买家创建订单（使用当前设定的固定金额）
+      // 路由 2: 买家创建订单
       if (path === "/api/order/create" && request.method === "POST") {
         const body = await request.json();
         const region = body.region || "美国";
@@ -84,7 +83,6 @@ export default {
           return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后再试或联系站长补货！` }, corsHeaders);
         }
 
-        // 获取固定金额
         let priceStr = env.PRICE_PER_ACCOUNT || "4.99";
         try {
           const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
@@ -128,7 +126,55 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 4: 管理员后台 - 获取待核销订单列表与数据
+      // 路由 4: V免签安卓 App 心跳与到账异步回调接口 (/api/v1/notify 或 /appHeart)
+      if (path === "/appHeart" || path === "/api/v1/heart") {
+        // V免签 App 心跳检测
+        return new Response("success", { status: 200 });
+      }
+
+      if (path === "/appPush" || path === "/api/v1/notify" || path === "/notify") {
+        // 接收 V免签 App 自动推送的收款数据
+        let params = {};
+        if (request.method === "POST") {
+          try {
+            params = await request.json();
+          } catch (e) {
+            const formData = await request.formData();
+            for (const [k, v] of formData.entries()) params[k] = v;
+          }
+        } else {
+          url.searchParams.forEach((v, k) => { params[k] = v; });
+        }
+
+        const type = params.type; // 1:微信, 2:支付宝
+        const money = parseFloat(params.price || params.money || "0.00");
+        const sign = params.sign;
+        const key = env.ADMIN_KEY || "51245124";
+
+        // 查找最近一笔待支付且金额相符的订单进行自动核销
+        const pendingOrder = await env.DB.prepare(`
+          SELECT * FROM orders 
+          WHERE status = 0 AND ABS(price - ?) < 0.05
+          ORDER BY id DESC LIMIT 1
+        `).bind(money).first();
+
+        if (pendingOrder) {
+          // 自动从对应地区提取一张卡密
+          const carmiRecord = await env.DB.prepare(
+            "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
+          ).bind(pendingOrder.region).first();
+
+          if (carmiRecord) {
+            await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(pendingOrder.order_no, carmiRecord.id).run();
+            await env.DB.prepare("UPDATE orders SET status = 1, carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(carmiRecord.carmi, pendingOrder.order_no).run();
+            console.log(`🎉 [V免签自动发卡] 订单 ${pendingOrder.order_no} 已自动核销并秒发卡密！`);
+          }
+        }
+
+        return new Response("success", { status: 200 });
+      }
+
+      // 路由 5: 管理员后台 - 获取待核销订单列表与数据
       if (path === "/api/admin/orders") {
         const key = url.searchParams.get("key") || "";
         if (key !== (env.ADMIN_KEY || "51245124")) {
@@ -168,7 +214,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 5: 管理员后台 - 修改固定价格
+      // 路由 6: 管理员后台 - 修改固定价格
       if (path === "/api/admin/set_price" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -178,7 +224,7 @@ export default {
 
         const price = parseFloat(body.price);
         if (isNaN(price) || price <= 0) {
-          return jsonResponse({ code: -1, msg: "请输入有效的正数金额" }, corsHeaders);
+          return jsonResponse({ code: -1, msg: "请输入有效金额" }, corsHeaders);
         }
 
         await env.DB.prepare(`
@@ -189,11 +235,11 @@ export default {
 
         return jsonResponse({
           code: 0,
-          msg: `🎉 固定金额已成功设置为：￥${price.toFixed(2)}！`
+          msg: `🎉 固定金额已设置为：￥${price.toFixed(2)}！`
         }, corsHeaders);
       }
 
-      // 路由 6: 管理员后台 - 一键上传收款码保存至 Cloudflare D1
+      // 路由 7: 管理员后台 - 上传收款码
       if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -218,7 +264,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 7: 管理员后台 - 一键核销并发卡
+      // 路由 8: 管理员后台 - 手动一键核销发卡
       if (path === "/api/admin/approve" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -228,29 +274,25 @@ export default {
 
         const orderNo = body.order_no;
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 0").bind(orderNo).first();
-        if (!order) {
-          return jsonResponse({ code: -1, msg: "订单不存在或已被核销" }, corsHeaders);
-        }
+        if (!order) return jsonResponse({ code: -1, msg: "订单不存在或已被核销" }, corsHeaders);
 
         const carmiRecord = await env.DB.prepare(
           "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
         ).bind(order.region).first();
 
-        if (!carmiRecord) {
-          return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密！` }, corsHeaders);
-        }
+        if (!carmiRecord) return jsonResponse({ code: -1, msg: `【${order.region}】库存不足！` }, corsHeaders);
 
         await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
         await env.DB.prepare("UPDATE orders SET status = 1, carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(carmiRecord.carmi, orderNo).run();
 
         return jsonResponse({
           code: 0,
-          msg: "核销成功，已自动为买家出卡！",
+          msg: "核销成功，已自动出卡！",
           carmi: carmiRecord.carmi
         }, corsHeaders);
       }
 
-      // 路由 8: 管理员手动批量导入卡密
+      // 路由 9: 管理员手动批量导入卡密
       if (path === "/api/admin/import" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -279,21 +321,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 8.1: 管理员后台 - 一键手动触发抓取
-      if (path === "/api/admin/sync") {
-        const key = url.searchParams.get("key") || "";
-        if (key !== (env.ADMIN_KEY || "51245124")) {
-          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
-        }
-        const result = await syncAccountsFromSource(env);
-        return jsonResponse({
-          code: 0,
-          msg: result.error ? `同步失败: ${result.error}` : `同步完成！本次新增入库 ${result.inserted} 条卡密，总解析到 ${result.total} 条账号。`,
-          data: result
-        }, corsHeaders);
-      }
-
-      // 路由 9: 历史订单查询
+      // 路由 10: 历史订单查询
       if (path === "/api/order/query") {
         const queryVal = (url.searchParams.get("keyword") || "").trim();
         if (!queryVal) return jsonResponse({ code: -1, msg: "请输入订单号或联系方式" }, corsHeaders);
@@ -308,14 +336,14 @@ export default {
         return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
       }
 
-      // 路由 10: 管理员后台页面 (/admin)
+      // 路由 11: 管理员后台页面 (/admin)
       if (path === "/admin") {
         return new Response(getAdminHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
 
-      // 路由 11: 买家前台首页
+      // 路由 12: 买家前台首页
       if (path === "/" || path === "/index.html") {
         return new Response(getFrontendHTML(env), {
           headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -497,15 +525,15 @@ function getFrontendHTML(env) {
         </div>
 
         <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-left space-y-1">
-          <div class="text-xs text-amber-300 font-medium">⚠️ 付款关键步骤：</div>
+          <div class="text-xs text-amber-300 font-medium">⚠️ 支付提醒：</div>
           <div class="text-xs text-slate-300 leading-relaxed">
-            1. 扫码固定支付：<span class="text-emerald-400 font-bold" id="pay-money">￥4.99</span><br>
-            2. 微信付款备注填写：<span class="text-xl font-black text-amber-400 font-mono select-all" id="pay-check-code">8888</span>
+            微信扫码支付：<span class="text-emerald-400 font-bold text-sm" id="pay-money">￥4.99</span><br>
+            <span class="text-indigo-300">付款成功后系统将自动秒级出卡！</span>
           </div>
         </div>
 
         <div class="text-xs text-slate-400 flex items-center justify-center gap-2">
-          <i class="fa-solid fa-spinner fa-spin text-indigo-400"></i> 付款后正在自动检测出卡中...
+          <i class="fa-solid fa-spinner fa-spin text-indigo-400"></i> 等待支付中，付款后自动出卡...
         </div>
 
         <button onclick="cancelPay()" class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl text-sm transition">
@@ -602,7 +630,7 @@ function getFrontendHTML(env) {
       const contact = document.getElementById("contact").value.trim();
       const btn = document.getElementById("btn-submit");
       btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在生成支付核销单...';
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在生成支付单...';
 
       try {
         const res = await fetch("/api/order/create", {
@@ -614,7 +642,6 @@ function getFrontendHTML(env) {
         if (data.code === 0) {
           currentOrderNo = data.data.order_no;
           document.getElementById("pay-money").innerText = "￥" + data.data.price;
-          document.getElementById("pay-check-code").innerText = data.data.check_code;
           document.getElementById("modal-pay").classList.remove("hidden");
           startPolling();
         } else {
@@ -644,7 +671,7 @@ function getFrontendHTML(env) {
             loadStats();
           }
         } catch (e) {}
-      }, 2500);
+      }, 2000);
     }
 
     function cancelPay() {
@@ -670,7 +697,7 @@ function getFrontendHTML(env) {
                 <span class="text-indigo-400">\${o.region}</span>
               </div>
               <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
-                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">待核销付款中</span>'}
+                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">等待付款中</span>'}
               </div>
               <div class="text-xs text-slate-500">下单时间: \${o.created_at}</div>
             </div>
@@ -729,7 +756,7 @@ function getAdminHTML(env) {
 <body class="p-4 max-w-2xl mx-auto">
   <div class="mb-6 flex justify-between items-center border-b border-slate-800 pb-4">
     <h1 class="text-xl font-bold flex items-center gap-2 text-indigo-400">
-      <i class="fa-solid fa-shield-halved"></i> 站长核销与设置面板
+      <i class="fa-solid fa-shield-halved"></i> 站长控制台 (V免签自动发卡)
     </h1>
     <a href="/" class="text-xs text-slate-400 hover:text-white">返回首页</a>
   </div>
@@ -739,6 +766,15 @@ function getAdminHTML(env) {
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 flex gap-2">
       <input type="password" id="admin-key" placeholder="输入管理员密钥" value="51245124" class="flex-1 px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm text-white">
       <button onclick="loadAdminData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium">刷新</button>
+    </div>
+
+    <!-- V免签监控端配置信息 -->
+    <div class="p-4 rounded-xl bg-indigo-950/40 border border-indigo-500/30 space-y-2 text-xs text-slate-300">
+      <div class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
+        <i class="fa-solid fa-mobile-screen"></i> V免签安卓监控端配置参数
+      </div>
+      <div>1. <b>通信接口 URL</b>: <code class="bg-slate-900 px-2 py-0.5 rounded text-emerald-400 select-all font-mono">https://cf-auto-faka.maleftt88888888.workers.dev/notify</code></div>
+      <div>2. <b>通信秘钥 (KEY)</b>: <code class="bg-slate-900 px-2 py-0.5 rounded text-emerald-400 select-all font-mono">51245124</code></div>
     </div>
 
     <!-- 设置固定销售价格 -->
@@ -752,12 +788,12 @@ function getAdminHTML(env) {
           <input type="number" id="price-input" step="0.01" min="0.01" placeholder="4.99" class="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm font-bold text-emerald-400">
         </div>
         <button onclick="savePrice()" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1">
-          <i class="fa-solid fa-floppy-disk"></i> 保存固定价格
+          <i class="fa-solid fa-floppy-disk"></i> 保存价格
         </button>
       </div>
     </div>
 
-    <!-- 上传微信收款码图片至 Cloudflare 存储 -->
+    <!-- 上传微信收款码图片 -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
       <h2 class="font-bold text-emerald-400 flex items-center gap-2 text-sm">
         <i class="fa-solid fa-image"></i> 设置微信收款码 (直接保存至 Cloudflare)
@@ -779,7 +815,7 @@ function getAdminHTML(env) {
     <!-- 待核销订单列表 -->
     <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
       <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
-        <i class="fa-solid fa-bell"></i> 待核销订单（买家扫码付款后点击发卡）
+        <i class="fa-solid fa-bell"></i> 待支付/待核销订单
       </h2>
       <div id="pending-list" class="space-y-2">
         <div class="text-slate-500 text-xs py-2 text-center">点击刷新加载数据</div>
@@ -837,7 +873,7 @@ function getAdminHTML(env) {
           }
 
           if (json.pending.length === 0) {
-            pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-2">暂无待核销订单</div>';
+            pBox.innerHTML = '<div class="text-xs text-slate-500 text-center py-2">暂无待付款订单</div>';
           } else {
             pBox.innerHTML = json.pending.map(o => \`
               <div class="p-3 rounded-lg bg-slate-800 border border-slate-700 flex justify-between items-center gap-2">
@@ -847,7 +883,7 @@ function getAdminHTML(env) {
                   <div class="text-slate-500">\${o.created_at}</div>
                 </div>
                 <button onclick="approveOrder('\${o.order_no}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs shadow-lg flex items-center gap-1">
-                  <i class="fa-solid fa-check"></i> 确认发卡
+                  <i class="fa-solid fa-check"></i> 手动发卡
                 </button>
               </div>
             \`).join("");
@@ -873,7 +909,7 @@ function getAdminHTML(env) {
     async function savePrice() {
       const key = document.getElementById("admin-key").value.trim();
       const price = document.getElementById("price-input").value.trim();
-      if (!price || parseFloat(price) <= 0) return alert("请输入有效的金额");
+      if (!price || parseFloat(price) <= 0) return alert("请输入有效金额");
 
       try {
         const res = await fetch("/api/admin/set_price", {
@@ -903,7 +939,6 @@ function getAdminHTML(env) {
       reader.onload = function(e) {
         const img = new Image();
         img.onload = async function() {
-          // 自动压缩为适合展示的高清尺寸 (最大宽/高 600px)，体积仅几十KB
           const canvas = document.createElement("canvas");
           const maxDim = 600;
           let w = img.width, h = img.height;
@@ -940,7 +975,7 @@ function getAdminHTML(env) {
 
     async function approveOrder(orderNo) {
       const key = document.getElementById("admin-key").value.trim();
-      if (!confirm("确认已收到该笔微信款项并为买家出卡？")) return;
+      if (!confirm("确认手动为买家出卡？")) return;
 
       try {
         const res = await fetch("/api/admin/approve", {
