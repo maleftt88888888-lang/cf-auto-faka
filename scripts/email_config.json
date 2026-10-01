@@ -2,7 +2,7 @@
     "imap_server": "imap.qq.com",
     "imap_port": 993,
     "email_user": "your_email@qq.com",
-    "email_auth_code": "your_imap_auth_code",
+    "email_auth_code": "ewehpirrnguwbjie",
     "server_notify_url": "https://faka.medpic.eu.cc/api/pay/notify",
     "communication_key": "51245124",
     "check_interval_seconds": 3
