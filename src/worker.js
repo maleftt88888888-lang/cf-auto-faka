@@ -734,27 +734,49 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
-    <!-- 弹窗 2：发卡成功结果 -->
+    <!-- 弹窗 2：发卡成功结果 (账号密码分别独立显示与单独一键复制) -->
     <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
       <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40">
         <div class="text-center">
-          <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-3 border border-emerald-500/30">
+          <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-2 border border-emerald-500/30">
             <i class="fa-solid fa-check text-xl"></i>
           </div>
           <h3 class="text-xl font-bold text-white">提取卡密成功！</h3>
-          <p class="text-xs text-slate-400 mt-1">订单号: <span id="res-order-no" class="font-mono text-indigo-300"></span></p>
+          <p class="text-xs text-slate-400 mt-0.5">订单号: <span id="res-order-no" class="font-mono text-indigo-300"></span></p>
         </div>
 
         <div class="bg-slate-900/90 rounded-xl p-4 border border-slate-800 space-y-3">
-          <div>
-            <div class="flex justify-between items-center mb-1">
-              <span class="text-xs text-slate-400">账号密码卡密：</span>
-              <span id="warranty-badge" class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
-                <i class="fa-solid fa-shield-halved"></i> 2小时质保中
-              </span>
-            </div>
-            <div id="res-carmi" class="text-sm font-mono text-emerald-400 select-all break-all bg-slate-950 p-3 rounded-lg border border-slate-800"></div>
+          <div class="flex justify-between items-center mb-1">
+            <span class="text-xs text-slate-400 font-medium">账号信息详情：</span>
+            <span id="warranty-badge" class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
+              <i class="fa-solid fa-shield-halved"></i> 2小时质保中
+            </span>
           </div>
+
+          <!-- 独立账号卡片 -->
+          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-[11px] text-slate-400 mb-0.5">Apple ID 账号 (邮箱)</div>
+              <div id="res-account" class="text-sm font-mono text-white font-semibold truncate select-all">--</div>
+            </div>
+            <button onclick="copySingleField('res-account', '账号已复制')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 shadow">
+              <i class="fa-solid fa-copy"></i> 复制账号
+            </button>
+          </div>
+
+          <!-- 独立密码卡片 -->
+          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="text-[11px] text-slate-400 mb-0.5">登录密码</div>
+              <div id="res-password" class="text-sm font-mono text-emerald-400 font-semibold truncate select-all">--</div>
+            </div>
+            <button onclick="copySingleField('res-password', '密码已复制')" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 shadow">
+              <i class="fa-solid fa-copy"></i> 复制密码
+            </button>
+          </div>
+
+          <!-- 隐藏的完整卡密引用 -->
+          <div id="res-carmi" class="hidden"></div>
 
           <!-- 方案4：质保与换号风控控制栏 -->
           <div id="warranty-action-box" class="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
@@ -768,10 +790,10 @@ function getFrontendHTML(env) {
         </div>
 
         <div class="flex gap-3">
-          <button onclick="copyCarmi()" class="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl transition flex items-center justify-center gap-2">
-            <i class="fa-solid fa-copy"></i> 一键复制卡密
+          <button onclick="copyAllCarmi()" class="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl transition flex items-center justify-center gap-2 text-xs">
+            <i class="fa-solid fa-clone"></i> 复制完整账号+密码
           </button>
-          <button onclick="closeModal()" class="px-5 py-3 bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium rounded-xl transition">
+          <button onclick="closeModal()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition text-xs">
             完成
           </button>
         </div>
@@ -789,6 +811,98 @@ function getFrontendHTML(env) {
     let loadedRegions = [];
     let currentOrderNo = null;
     let warrantyTimer = null;
+    let currentFullCarmi = "";
+
+    function parseCarmi(raw) {
+      if (!raw) return { account: "", password: "", raw: "" };
+      let account = "";
+      let password = "";
+
+      const accMatch = raw.match(/账号:\s*([^\s-]+)/);
+      if (accMatch) account = accMatch[1].trim();
+
+      const pwdMatch = raw.match(/密码:\s*(.+)$/);
+      if (pwdMatch) password = pwdMatch[1].trim();
+
+      if (!account && !password) {
+        if (raw.includes("----")) {
+          const parts = raw.split("----");
+          account = parts[0].replace(/【.*?】/g, "").replace("账号:", "").trim();
+          password = parts[1].replace("密码:", "").trim();
+        } else {
+          account = raw;
+        }
+      }
+
+      return { account, password, raw };
+    }
+
+    function renderCarmiResult(carmiStr) {
+      currentFullCarmi = carmiStr || "";
+      const parsed = parseCarmi(carmiStr);
+      const accEl = document.getElementById("res-account");
+      const pwdEl = document.getElementById("res-password");
+      const rawEl = document.getElementById("res-carmi");
+      if (accEl) accEl.innerText = parsed.account || carmiStr || "--";
+      if (pwdEl) pwdEl.innerText = parsed.password || "--";
+      if (rawEl) rawEl.innerText = carmiStr || "";
+    }
+
+    function showToast(msg) {
+      let toast = document.getElementById("toast-msg");
+      if (!toast) {
+        toast = document.createElement("div");
+        toast.id = "toast-msg";
+        toast.className = "fixed top-6 left-1/2 -translate-x-1/2 px-4 py-2 bg-emerald-500 text-white text-xs font-bold rounded-full shadow-2xl z-[9999] transition duration-300 opacity-0 pointer-events-none flex items-center gap-1.5";
+        document.body.appendChild(toast);
+      }
+      toast.innerHTML = '<i class="fa-solid fa-circle-check"></i> ' + msg;
+      toast.classList.remove("opacity-0");
+      toast.classList.add("opacity-100");
+      setTimeout(() => {
+        toast.classList.remove("opacity-100");
+        toast.classList.add("opacity-0");
+      }, 2000);
+    }
+
+    function copyText(text, successMsg) {
+      if (!text) return;
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => {
+          showToast(successMsg || "复制成功！");
+        }).catch(() => {
+          fallbackCopy(text, successMsg);
+        });
+      } else {
+        fallbackCopy(text, successMsg);
+      }
+    }
+
+    function fallbackCopy(text, successMsg) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        showToast(successMsg || "复制成功！");
+      } catch (err) {
+        alert("复制失败，请手动长按复制");
+      }
+      document.body.removeChild(textArea);
+    }
+
+    function copySingleField(elementId, msg) {
+      const el = document.getElementById(elementId);
+      if (el) copyText(el.innerText, msg);
+    }
+
+    function copyAllCarmi() {
+      copyText(currentFullCarmi, "完整账号密码已复制！");
+    }
 
     async function loadStats() {
       try {
@@ -877,13 +991,11 @@ function getFrontendHTML(env) {
         const json = await res.json();
         if (json.code === 0) {
           if (json.status === 1 && json.carmi) {
-            // 已出卡，直接弹出发卡结果
             document.getElementById("res-order-no").innerText = currentOrderNo;
-            document.getElementById("res-carmi").innerText = json.carmi;
+            renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, currentOrderNo);
             document.getElementById("modal-result").classList.remove("hidden");
           } else {
-            // 待提卡，弹出扫码提卡窗口
             document.getElementById("pay-money").innerText = "￥" + json.price;
             document.getElementById("modal-pay").classList.remove("hidden");
           }
@@ -979,7 +1091,7 @@ function getFrontendHTML(env) {
         if (json.code === 0) {
           document.getElementById("modal-pay").classList.add("hidden");
           document.getElementById("res-order-no").innerText = targetOrder;
-          document.getElementById("res-carmi").innerText = json.data.carmi;
+          renderCarmiResult(json.data.carmi);
           updateWarrantyUI(json.data.warranty, targetOrder);
           document.getElementById("modal-result").classList.remove("hidden");
           loadStats();
@@ -1017,9 +1129,7 @@ function getFrontendHTML(env) {
         const json = await res.json();
         if (json.code === 0) {
           alert("🎉 换号成功！已为您换发源站最新账号！");
-          if (document.getElementById("res-carmi")) {
-            document.getElementById("res-carmi").innerText = json.data.carmi;
-          }
+          renderCarmiResult(json.data.carmi);
           updateWarrantyUI(json.data.warranty, targetOrderNo);
           if (!document.getElementById("panel-query").classList.contains("hidden")) {
             queryOrders();
@@ -1054,6 +1164,7 @@ function getFrontendHTML(env) {
         if (json.code === 0 && json.data.length > 0) {
           resBox.innerHTML = json.data.map(o => {
             const w = o.warranty || {};
+            const parsed = parseCarmi(o.carmi || "");
             let statusHtml = '';
             if (o.status === 1) {
               if (w.can_replace) {
@@ -1070,16 +1181,25 @@ function getFrontendHTML(env) {
             }
 
             return \`
-              <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+              <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
                 <div class="flex justify-between items-center text-xs text-slate-400">
                   <span>订单号: \${o.order_no}</span>
-                  <span class="text-indigo-400">\${o.region}</span>
+                  <span class="text-indigo-400 font-medium">\${o.region}</span>
                 </div>
-                <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
-                  \${o.status === 1 ? o.carmi : '<span class="text-amber-400">待付款/待提卡</span>'}
-                </div>
-                <div class="flex justify-between items-center text-xs text-slate-500 pt-1">
-                  <span>下单时间: \${o.created_at}</span>
+                \${o.status === 1 ? \`
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between p-2.5 bg-slate-950 rounded-lg border border-slate-800">
+                      <div class="text-xs font-mono text-white truncate mr-2"><span class="text-slate-500">账号: </span>\${parsed.account}</div>
+                      <button onclick="copyText('\${parsed.account}', '账号已复制')" class="px-2.5 py-1 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded text-[11px] font-medium shrink-0">复制账号</button>
+                    </div>
+                    <div class="flex items-center justify-between p-2.5 bg-slate-950 rounded-lg border border-slate-800">
+                      <div class="text-xs font-mono text-emerald-400 truncate mr-2"><span class="text-slate-500">密码: </span>\${parsed.password}</div>
+                      <button onclick="copyText('\${parsed.password}', '密码已复制')" class="px-2.5 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[11px] font-medium shrink-0">复制密码</button>
+                    </div>
+                  </div>
+                \` : '<div class="text-xs font-mono text-amber-400 bg-slate-950 p-2.5 rounded border border-slate-800">待付款/待提卡</div>'}
+                <div class="flex justify-between items-center text-xs text-slate-500 pt-1 border-t border-slate-800/60">
+                  <span>下单: \${o.created_at}</span>
                   <div class="flex items-center gap-3">
                     \${statusHtml}
                   </div>
@@ -1107,11 +1227,6 @@ function getFrontendHTML(env) {
         document.getElementById("tab-query").className = "py-2.5 px-6 font-medium text-indigo-400 border-b-2 border-indigo-500 flex items-center gap-2";
         document.getElementById("tab-buy").className = "py-2.5 px-6 font-medium text-slate-400 hover:text-slate-200 flex items-center gap-2";
       }
-    }
-
-    function copyCarmi() {
-      const text = document.getElementById("res-carmi").innerText;
-      navigator.clipboard.writeText(text).then(() => alert("卡密已成功复制到剪贴板！"));
     }
 
     function closeModal() {
