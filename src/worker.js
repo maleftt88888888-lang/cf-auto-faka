@@ -25,6 +25,9 @@ export default {
     }
 
     try {
+      // 自动确保数据库表结构完整
+      await ensureDbMigrated(env);
+
       // 路由 1: 获取各地区库存统计及网站配置
       if (path === "/api/stats") {
         const rows = await env.DB.prepare(`
@@ -94,8 +97,8 @@ export default {
         const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
 
         await env.DB.prepare(`
-          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at)
-          VALUES (?, ?, ?, ?, 0, ?, datetime('now'))
+          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count)
+          VALUES (?, ?, ?, ?, 0, ?, datetime('now'), 0)
         `).bind(orderNo, region, contact, price, `核销码:${checkCode}`).run();
 
         return jsonResponse({
@@ -124,12 +127,13 @@ export default {
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
 
-        // 如果该订单之前已出过卡密，直接返回之前已领取的卡密
+        // 如果该订单之前已出过卡密，直接返回之前已领取的卡密（防止刷单重复获取不同卡）
         if (order.status === 1 && order.carmi) {
+          const warranty = getOrderWarrantyInfo(order);
           return jsonResponse({
             code: 0,
             msg: "提取成功",
-            data: { order_no: orderNo, carmi: order.carmi, region: order.region }
+            data: { order_no: orderNo, carmi: order.carmi, region: order.region, warranty }
           }, corsHeaders);
         }
 
@@ -138,7 +142,7 @@ export default {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        // 🌟 核心：用户每次提卡时，系统直接实时穿透请求原网页抓取最新账号
+        // 🌟 方案4：用户提卡时实时穿透请求原网页抓取最新账号
         console.log(`⚡ 用户提卡中 (订单 ${orderNo}, 地区 ${order.region})，正在实时从原网页获取最新账号...`);
         const freshAccount = await fetchLatestLiveAccount(env, order.region);
 
@@ -151,9 +155,12 @@ export default {
         }
         await env.DB.prepare(`
           UPDATE orders 
-          SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now')
+          SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now'), replace_count = 0
           WHERE order_no = ?
         `).bind(freshAccount.carmi, `微信单号:${tradeNo}`, orderNo).run();
+
+        const updatedOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
+        const warranty = getOrderWarrantyInfo(updatedOrder);
 
         return jsonResponse({
           code: 0,
@@ -161,12 +168,13 @@ export default {
           data: {
             order_no: orderNo,
             carmi: freshAccount.carmi,
-            region: freshAccount.region || order.region
+            region: freshAccount.region || order.region,
+            warranty
           }
         }, corsHeaders);
       }
 
-      // 路由 3.5: 密码错误自助换号
+      // 路由 3.5: 密码错误自助换号（方案4：严格限制2小时内且最多1次）
       if (path === "/api/order/replace" && request.method === "POST") {
         const body = await request.json();
         const orderNo = (body.order_no || "").trim();
@@ -176,33 +184,46 @@ export default {
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 1").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "未找到已完成的有效订单" }, corsHeaders);
 
-        console.log(`🔄 买家针对订单 ${orderNo} 申请换号，正在实时抓取源站最新账号...`);
-        await syncAccountsFromSource(env);
-
-        let newCarmiRecord = await env.DB.prepare(
-          "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 AND carmi != ? ORDER BY RANDOM() LIMIT 1"
-        ).bind(order.region, order.carmi || "").first();
-
-        if (!newCarmiRecord) {
-          newCarmiRecord = await env.DB.prepare(
-            "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND carmi != ? ORDER BY id DESC LIMIT 1"
-          ).bind(order.region, order.carmi || "").first();
+        const warranty = getOrderWarrantyInfo(order);
+        if (!warranty.can_replace) {
+          if (warranty.is_expired) {
+            return jsonResponse({ code: -1, msg: "⚠️ 该订单已超过 2 小时售后保修期，已永久锁定归档！如需最新账号请重新下单购买。" }, corsHeaders);
+          }
+          if (warranty.is_limit_reached) {
+            return jsonResponse({ code: -1, msg: "⚠️ 该订单已达到最大免费换号次数（上限 1 次），卡密已锁定。" }, corsHeaders);
+          }
+          return jsonResponse({ code: -1, msg: "该订单当前不可换号" }, corsHeaders);
         }
 
-        if (!newCarmiRecord) {
-          return jsonResponse({ code: -1, msg: "暂无可替换的新账号，请稍后再试！" }, corsHeaders);
+        console.log(`🔄 买家针对订单 ${orderNo} 申请换号（限额 1 次），正在实时抓取源站最新账号...`);
+        const freshAccount = await fetchLatestLiveAccount(env, order.region);
+
+        if (!freshAccount || !freshAccount.carmi) {
+          return jsonResponse({ code: -1, msg: "原网站暂无可替换的新账号，请稍后再试！" }, corsHeaders);
         }
 
-        await env.DB.prepare("UPDATE orders SET carmi = ?, paid_at = datetime('now') WHERE order_no = ?").bind(newCarmiRecord.carmi, orderNo).run();
-        await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, newCarmiRecord.id).run();
+        const newReplaceCount = (order.replace_count || 0) + 1;
+        await env.DB.prepare(`
+          UPDATE orders 
+          SET carmi = ?, replace_count = ?
+          WHERE order_no = ?
+        `).bind(freshAccount.carmi, newReplaceCount, orderNo).run();
+
+        if (freshAccount.id) {
+          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, freshAccount.id).run();
+        }
+
+        const newOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
+        const newWarranty = getOrderWarrantyInfo(newOrder);
 
         return jsonResponse({
           code: 0,
           msg: "🎉 已为您从源站成功获取并换发最新账号！",
           data: {
             order_no: orderNo,
-            carmi: newCarmiRecord.carmi,
-            region: order.region
+            carmi: freshAccount.carmi,
+            region: freshAccount.region || order.region,
+            warranty: newWarranty
           }
         }, corsHeaders);
       }
@@ -212,15 +233,18 @@ export default {
         const orderNo = url.searchParams.get("order_no");
         if (!orderNo) return jsonResponse({ code: -1, msg: "缺少订单号" }, corsHeaders);
 
-        const order = await env.DB.prepare("SELECT order_no, status, carmi, region, price FROM orders WHERE order_no = ?").bind(orderNo).first();
+        const order = await env.DB.prepare("SELECT order_no, status, carmi, region, price, created_at, paid_at, replace_count FROM orders WHERE order_no = ?").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
+
+        const warranty = getOrderWarrantyInfo(order);
 
         return jsonResponse({
           code: 0,
           status: order.status,
           carmi: order.carmi || "",
           region: order.region,
-          price: order.price
+          price: order.price,
+          warranty
         }, corsHeaders);
       }
 
@@ -377,13 +401,20 @@ export default {
         if (!queryVal) return jsonResponse({ code: -1, msg: "请输入订单号或联系方式" }, corsHeaders);
 
         const orders = await env.DB.prepare(`
-          SELECT order_no, region, contact, price, status, carmi, created_at, paid_at
+          SELECT order_no, region, contact, price, status, carmi, created_at, paid_at, replace_count
           FROM orders
           WHERE order_no = ? OR contact = ? OR pay_type LIKE ?
           ORDER BY id DESC LIMIT 10
         `).bind(queryVal, queryVal, `%${queryVal}%`).all();
 
-        return jsonResponse({ code: 0, data: orders.results || [] }, corsHeaders);
+        const results = (orders.results || []).map(o => {
+          return {
+            ...o,
+            warranty: getOrderWarrantyInfo(o)
+          };
+        });
+
+        return jsonResponse({ code: 0, data: results }, corsHeaders);
       }
 
       // 路由 11: 管理员后台页面 (/admin)
@@ -408,6 +439,64 @@ export default {
     }
   }
 };
+
+/**
+ * 确保数据库表结构完整
+ */
+async function ensureDbMigrated(env) {
+  try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN replace_count INTEGER DEFAULT 0").run();
+  } catch (e) {}
+}
+
+/**
+ * 方案 4: 质保期与提取次数计算（2小时质保 + 最多1次换号）
+ */
+function getOrderWarrantyInfo(order) {
+  const GUARANTEE_HOURS = 2; // 2 小时质保
+  const MAX_REPLACE = 1;      // 最多允许换号 1 次
+
+  if (!order || order.status !== 1) {
+    return {
+      is_locked: false,
+      is_expired: false,
+      is_limit_reached: false,
+      remaining_seconds: 0,
+      replace_count: 0,
+      max_replace: MAX_REPLACE,
+      can_replace: false
+    };
+  }
+
+  const baseTimeStr = order.paid_at || order.created_at;
+  let baseTime = Date.now();
+  if (baseTimeStr) {
+    const parsed = new Date(baseTimeStr.replace(" ", "T") + "Z").getTime();
+    if (!isNaN(parsed)) baseTime = parsed;
+  }
+
+  const now = Date.now();
+  const elapsedSeconds = Math.max(0, Math.floor((now - baseTime) / 1000));
+  const totalGuaranteeSeconds = GUARANTEE_HOURS * 3600;
+  const remainingSeconds = Math.max(0, totalGuaranteeSeconds - elapsedSeconds);
+  const replaceCount = order.replace_count || 0;
+
+  const isExpired = remainingSeconds <= 0;
+  const isLimitReached = replaceCount >= MAX_REPLACE;
+  const isLocked = isExpired || isLimitReached;
+  const canReplace = !isExpired && !isLimitReached;
+
+  return {
+    is_locked: isLocked,
+    is_expired: isExpired,
+    is_limit_reached: isLimitReached,
+    remaining_seconds: remainingSeconds,
+    replace_count: replaceCount,
+    max_replace: MAX_REPLACE,
+    can_replace: canReplace,
+    guarantee_hours: GUARANTEE_HOURS
+  };
+}
 
 /**
  * 每次提卡时实时穿透抓取源站最新账号
@@ -660,11 +749,21 @@ function getFrontendHTML(env) {
           <div>
             <div class="flex justify-between items-center mb-1">
               <span class="text-xs text-slate-400">账号密码卡密：</span>
-              <span class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
-                <i class="fa-solid fa-bolt"></i> 原网页实时最新账号
+              <span id="warranty-badge" class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
+                <i class="fa-solid fa-shield-halved"></i> 2小时质保中
               </span>
             </div>
             <div id="res-carmi" class="text-sm font-mono text-emerald-400 select-all break-all bg-slate-950 p-3 rounded-lg border border-slate-800"></div>
+          </div>
+
+          <!-- 方案4：质保与换号风控控制栏 -->
+          <div id="warranty-action-box" class="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
+            <span id="warranty-countdown" class="text-slate-400 font-mono flex items-center gap-1">
+              <i class="fa-regular fa-clock text-indigo-400"></i> 质保剩余: 计算中...
+            </span>
+            <button id="btn-replace" onclick="replaceCarmi()" class="text-amber-400 hover:text-amber-300 font-medium flex items-center gap-1">
+              <i class="fa-solid fa-rotate"></i> 密码错误？换号 (1/1)
+            </button>
           </div>
         </div>
 
@@ -689,6 +788,7 @@ function getFrontendHTML(env) {
     let currentSelectedRegion = "美国";
     let loadedRegions = [];
     let currentOrderNo = null;
+    let warrantyTimer = null;
 
     async function loadStats() {
       try {
@@ -716,6 +816,60 @@ function getFrontendHTML(env) {
       }
     }
 
+    function updateWarrantyUI(warranty, orderNo) {
+      if (warrantyTimer) clearInterval(warrantyTimer);
+
+      const badge = document.getElementById("warranty-badge");
+      const countdown = document.getElementById("warranty-countdown");
+      const btnReplace = document.getElementById("btn-replace");
+
+      if (!warranty || !warranty.remaining_seconds || warranty.is_locked) {
+        if (badge) {
+          badge.className = "text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700 flex items-center gap-1";
+          badge.innerHTML = '<i class="fa-solid fa-lock"></i> 账号已固化锁定';
+        }
+        if (countdown) countdown.innerHTML = '<span class="text-slate-500">已过质保期或已达换号上限</span>';
+        if (btnReplace) btnReplace.classList.add("hidden");
+        return;
+      }
+
+      let seconds = warranty.remaining_seconds;
+      if (badge) {
+        badge.className = "text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1";
+        badge.innerHTML = '<i class="fa-solid fa-shield-halved"></i> 2小时质保生效中';
+      }
+      if (btnReplace) {
+        if (warranty.can_replace) {
+          btnReplace.classList.remove("hidden");
+          btnReplace.innerHTML = \`<i class="fa-solid fa-rotate"></i> 密码错误？换号 (\${warranty.max_replace - warranty.replace_count}/\${warranty.max_replace})\`;
+        } else {
+          btnReplace.classList.add("hidden");
+        }
+      }
+
+      function renderCountdown() {
+        if (seconds <= 0) {
+          if (countdown) countdown.innerHTML = '<span class="text-slate-500">质保已过期</span>';
+          if (btnReplace) btnReplace.classList.add("hidden");
+          if (badge) {
+            badge.className = "text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700 flex items-center gap-1";
+            badge.innerHTML = '<i class="fa-solid fa-lock"></i> 账号已固化锁定';
+          }
+          clearInterval(warrantyTimer);
+          return;
+        }
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        if (countdown) {
+          countdown.innerHTML = \`<i class="fa-regular fa-clock text-indigo-400"></i> 质保剩余: <span class="text-indigo-300 font-bold">\${m}分\${s < 10 ? '0' : ''}\${s}秒</span>\`;
+        }
+        seconds--;
+      }
+
+      renderCountdown();
+      warrantyTimer = setInterval(renderCountdown, 1000);
+    }
+
     async function restoreRecentOrder() {
       if (!currentOrderNo) return;
       try {
@@ -726,6 +880,7 @@ function getFrontendHTML(env) {
             // 已出卡，直接弹出发卡结果
             document.getElementById("res-order-no").innerText = currentOrderNo;
             document.getElementById("res-carmi").innerText = json.carmi;
+            updateWarrantyUI(json.warranty, currentOrderNo);
             document.getElementById("modal-result").classList.remove("hidden");
           } else {
             // 待提卡，弹出扫码提卡窗口
@@ -825,6 +980,7 @@ function getFrontendHTML(env) {
           document.getElementById("modal-pay").classList.add("hidden");
           document.getElementById("res-order-no").innerText = targetOrder;
           document.getElementById("res-carmi").innerText = json.data.carmi;
+          updateWarrantyUI(json.data.warranty, targetOrder);
           document.getElementById("modal-result").classList.remove("hidden");
           loadStats();
         } else {
@@ -844,12 +1000,12 @@ function getFrontendHTML(env) {
       const targetOrderNo = orderNoToReplace || currentOrderNo;
       if (!targetOrderNo) return alert("缺少订单号");
 
-      if (!confirm("确定此账号无法登录？系统将立即自动从源站获取最新账号为您免费更换！")) return;
+      if (!confirm("确定此账号无法登录？系统将从源站获取最新账号为您免费更换（每单仅限 1 次，2小时内有效）！")) return;
 
       const btn = document.getElementById("btn-replace");
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在抓取最新账号换新...';
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在换新...';
       }
 
       try {
@@ -864,19 +1020,19 @@ function getFrontendHTML(env) {
           if (document.getElementById("res-carmi")) {
             document.getElementById("res-carmi").innerText = json.data.carmi;
           }
+          updateWarrantyUI(json.data.warranty, targetOrderNo);
           if (!document.getElementById("panel-query").classList.contains("hidden")) {
             queryOrders();
           }
           loadStats();
         } else {
-          alert(json.msg || "换号失败，请稍后重试");
+          alert(json.msg || "换号失败");
         }
       } catch (err) {
         alert("换号请求失败");
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.innerHTML = '<i class="fa-solid fa-rotate"></i> 密码错误？免费换号';
         }
       }
     }
@@ -896,21 +1052,41 @@ function getFrontendHTML(env) {
         const res = await fetch("/api/order/query?keyword=" + encodeURIComponent(kw));
         const json = await res.json();
         if (json.code === 0 && json.data.length > 0) {
-          resBox.innerHTML = json.data.map(o => \`
-            <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
-              <div class="flex justify-between items-center text-xs text-slate-400">
-                <span>订单号: \${o.order_no}</span>
-                <span class="text-indigo-400">\${o.region}</span>
+          resBox.innerHTML = json.data.map(o => {
+            const w = o.warranty || {};
+            let statusHtml = '';
+            if (o.status === 1) {
+              if (w.can_replace) {
+                const m = Math.floor((w.remaining_seconds || 0) / 60);
+                statusHtml = \`
+                  <span class="text-emerald-400 text-xs flex items-center gap-1"><i class="fa-solid fa-shield-halved"></i> 质保中 (剩\${m}分)</span>
+                  <button onclick="replaceCarmi('\${o.order_no}')" class="text-amber-400 hover:text-amber-300 font-medium text-xs"><i class="fa-solid fa-rotate"></i> 换号 (\${w.max_replace - w.replace_count}次)</button>
+                \`;
+              } else {
+                statusHtml = \`<span class="text-slate-500 text-xs flex items-center gap-1"><i class="fa-solid fa-lock"></i> 账号已固化锁定</span>\`;
+              }
+            } else {
+              statusHtml = \`<button onclick="currentOrderNo='\${o.order_no}';restoreRecentOrder();" class="text-emerald-400 hover:text-emerald-300 font-medium text-xs"><i class="fa-solid fa-key"></i> 去提卡</button>\`;
+            }
+
+            return \`
+              <div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+                <div class="flex justify-between items-center text-xs text-slate-400">
+                  <span>订单号: \${o.order_no}</span>
+                  <span class="text-indigo-400">\${o.region}</span>
+                </div>
+                <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
+                  \${o.status === 1 ? o.carmi : '<span class="text-amber-400">待付款/待提卡</span>'}
+                </div>
+                <div class="flex justify-between items-center text-xs text-slate-500 pt-1">
+                  <span>下单时间: \${o.created_at}</span>
+                  <div class="flex items-center gap-3">
+                    \${statusHtml}
+                  </div>
+                </div>
               </div>
-              <div class="text-sm font-mono text-emerald-400 bg-slate-950 p-2.5 rounded border border-slate-800 select-all break-all">
-                \${o.status === 1 ? o.carmi : '<span class="text-amber-400">已下单 (未提取卡密)</span>'}
-              </div>
-              <div class="flex justify-between items-center text-xs text-slate-500 pt-1">
-                <span>下单时间: \${o.created_at}</span>
-                \${o.status === 1 ? \`<button onclick="replaceCarmi('\${o.order_no}')" class="text-amber-400 hover:text-amber-300 font-medium"><i class="fa-solid fa-rotate"></i> 密码错误？换号</button>\` : \`<button onclick="currentOrderNo='\${o.order_no}';restoreRecentOrder();" class="text-emerald-400 hover:text-emerald-300 font-medium"><i class="fa-solid fa-key"></i> 点击去提卡</button>\`}
-              </div>
-            </div>
-          \`).join("");
+            \`;
+          }).join("");
         } else {
           resBox.innerHTML = '<div class="text-center text-slate-500 text-sm py-4">未查询到相关订单记录，请核对输入的手机号/邮箱</div>';
         }
