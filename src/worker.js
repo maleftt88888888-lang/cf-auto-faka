@@ -110,7 +110,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 3: 买家凭微信账单单号自助提取卡密
+      // 路由 3: 买家凭微信账单单号自助提取卡密 (提卡时实时穿透抓取原网页最新账号)
       if (path === "/api/order/claim" && request.method === "POST") {
         const body = await request.json();
         const orderNo = (body.order_no || "").trim();
@@ -124,6 +124,7 @@ export default {
         const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
 
+        // 如果该订单之前已出过卡密，直接返回之前已领取的卡密
         if (order.status === 1 && order.carmi) {
           return jsonResponse({
             code: 0,
@@ -137,35 +138,30 @@ export default {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        let carmiRecord = await env.DB.prepare(
-          "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
-        ).bind(order.region).first();
+        // 🌟 核心：用户每次提卡时，系统直接实时穿透请求原网页抓取最新账号
+        console.log(`⚡ 用户提卡中 (订单 ${orderNo}, 地区 ${order.region})，正在实时从原网页获取最新账号...`);
+        const freshAccount = await fetchLatestLiveAccount(env, order.region);
 
-        if (!carmiRecord) {
-          await syncAccountsFromSource(env);
-          carmiRecord = await env.DB.prepare(
-            "SELECT id, carmi FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY RANDOM() LIMIT 1"
-          ).bind(order.region).first();
+        if (!freshAccount || !freshAccount.carmi) {
+          return jsonResponse({ code: -1, msg: `原网站暂无可用的【${order.region}】最新账号，请稍后再试或联系站长！` }, corsHeaders);
         }
 
-        if (!carmiRecord) {
-          return jsonResponse({ code: -1, msg: `库存告急：【${order.region}】暂无可用的有效卡密，请联系站长补发！` }, corsHeaders);
+        if (freshAccount.id) {
+          await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, freshAccount.id).run();
         }
-
-        await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now') WHERE id = ?").bind(orderNo, carmiRecord.id).run();
         await env.DB.prepare(`
           UPDATE orders 
           SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now')
           WHERE order_no = ?
-        `).bind(carmiRecord.carmi, `微信单号:${tradeNo}`, orderNo).run();
+        `).bind(freshAccount.carmi, `微信单号:${tradeNo}`, orderNo).run();
 
         return jsonResponse({
           code: 0,
-          msg: "🎉 验证成功，卡密已发放！",
+          msg: "🎉 验证成功！已为您实时获取原网站最新可用账号！",
           data: {
             order_no: orderNo,
-            carmi: carmiRecord.carmi,
-            region: order.region
+            carmi: freshAccount.carmi,
+            region: freshAccount.region || order.region
           }
         }, corsHeaders);
       }
@@ -414,6 +410,41 @@ export default {
 };
 
 /**
+ * 每次提卡时实时穿透抓取源站最新账号
+ */
+async function fetchLatestLiveAccount(env, region) {
+  const syncRes = await syncAccountsFromSource(env);
+  const accounts = syncRes.accounts || [];
+
+  // 1. 优先匹配当前购买地区的最新账号
+  let matched = accounts.find(a => a.region === region);
+  if (!matched && accounts.length > 0) {
+    matched = accounts[0]; // fallback
+  }
+
+  if (matched) {
+    const carmi = `【${matched.region}】账号: ${matched.account} ---- 密码: ${matched.password}`;
+    return {
+      carmi: carmi,
+      region: matched.region,
+      account: matched.account,
+      password: matched.password
+    };
+  }
+
+  // 2. 如果源站当前抓取网络异常，从 D1 本地备用库中取一条未使用的卡密
+  const dbRecord = await env.DB.prepare(
+    "SELECT id, carmi, region FROM carmis WHERE (region = ? OR region = '通用') AND status = 0 ORDER BY id DESC LIMIT 1"
+  ).bind(region).first();
+
+  if (dbRecord) {
+    return { carmi: dbRecord.carmi, region: dbRecord.region, id: dbRecord.id };
+  }
+
+  return null;
+}
+
+/**
  * 核心抓取与解析逻辑 (适配 haoged.top/share/app)
  */
 async function syncAccountsFromSource(env) {
@@ -430,7 +461,7 @@ async function syncAccountsFromSource(env) {
     });
 
     if (!res.ok) {
-      return { total: 0, inserted: 0, error: `源站响应 HTTP ${res.status}: ${res.statusText}` };
+      return { total: 0, inserted: 0, accounts: [], error: `源站响应 HTTP ${res.status}: ${res.statusText}` };
     }
 
     const html = await res.text();
@@ -477,9 +508,9 @@ async function syncAccountsFromSource(env) {
       } catch (dbErr) {}
     }
 
-    return { total, inserted };
+    return { total, inserted, accounts };
   } catch (err) {
-    return { total: 0, inserted: 0, error: err.message };
+    return { total: 0, inserted: 0, accounts: [], error: err.message };
   }
 }
 
@@ -629,9 +660,9 @@ function getFrontendHTML(env) {
           <div>
             <div class="flex justify-between items-center mb-1">
               <span class="text-xs text-slate-400">账号密码卡密：</span>
-              <button onclick="replaceCarmi()" id="btn-replace" class="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1">
-                <i class="fa-solid fa-rotate"></i> 密码错误？免费换号
-              </button>
+              <span class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
+                <i class="fa-solid fa-bolt"></i> 原网页实时最新账号
+              </span>
             </div>
             <div id="res-carmi" class="text-sm font-mono text-emerald-400 select-all break-all bg-slate-950 p-3 rounded-lg border border-slate-800"></div>
           </div>
@@ -780,7 +811,7 @@ function getFrontendHTML(env) {
       const btn = document.getElementById("btn-claim");
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 核验中...';
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在从原网页提取最新账号...';
       }
 
       try {
