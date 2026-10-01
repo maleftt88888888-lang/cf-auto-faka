@@ -1397,12 +1397,12 @@ function getFrontendHTML(env) {
               if (w.can_replace) {
                 var m = Math.floor((w.remaining_seconds || 0) / 60);
                 statusHtml = '<span class="text-emerald-400 text-xs flex items-center gap-1"><i class="fa-solid fa-shield-halved"></i> 质保中 (剩' + m + '分)</span>' +
-                  '<button onclick="replaceCarmi(\'' + o.order_no + '\')" class="text-amber-400 hover:text-amber-300 font-medium text-xs"><i class="fa-solid fa-rotate"></i> 换号 (' + (w.max_replace - w.replace_count) + '次)</button>';
+                  '<button data-no="' + o.order_no + '" onclick="replaceCarmi(this.dataset.no)" class="text-amber-400 hover:text-amber-300 font-medium text-xs"><i class="fa-solid fa-rotate"></i> 换号 (' + (w.max_replace - w.replace_count) + '次)</button>';
               } else {
                 statusHtml = '<span class="text-slate-500 text-xs flex items-center gap-1"><i class="fa-solid fa-lock"></i> 账号已固化锁定</span>';
               }
             } else {
-              statusHtml = '<button onclick="currentOrderNo=\'' + o.order_no + '\';restoreRecentOrder();" class="text-emerald-400 hover:text-emerald-300 font-medium text-xs"><i class="fa-solid fa-key"></i> 去提卡</button>';
+              statusHtml = '<button data-no="' + o.order_no + '" onclick="currentOrderNo=this.dataset.no;restoreRecentOrder()" class="text-emerald-400 hover:text-emerald-300 font-medium text-xs"><i class="fa-solid fa-key"></i> 去提卡</button>';
             }
 
             return '<div class="p-4 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">' +
@@ -1414,11 +1414,11 @@ function getFrontendHTML(env) {
                   '<div class="space-y-2">' +
                     '<div class="flex items-center justify-between p-2.5 bg-slate-950 rounded-lg border border-slate-800">' +
                       '<div class="text-xs font-mono text-white truncate mr-2"><span class="text-slate-500">账号: </span>' + parsed.account + '</div>' +
-                      '<button onclick="copyText(\'' + parsed.account + '\', \'账号已复制\')" class="px-2.5 py-1 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded text-[11px] font-medium shrink-0">复制账号</button>' +
+                      '<button data-copy="' + parsed.account + '" onclick="copyText(this.dataset.copy)" class="px-2.5 py-1 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded text-[11px] font-medium shrink-0">复制账号</button>' +
                     '</div>' +
                     '<div class="flex items-center justify-between p-2.5 bg-slate-950 rounded-lg border border-slate-800">' +
                       '<div class="text-xs font-mono text-emerald-400 truncate mr-2"><span class="text-slate-500">密码: </span>' + parsed.password + '</div>' +
-                      '<button onclick="copyText(\'' + parsed.password + '\', \'密码已复制\')" class="px-2.5 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[11px] font-medium shrink-0">复制密码</button>' +
+                      '<button data-copy="' + parsed.password + '" onclick="copyText(this.dataset.copy)" class="px-2.5 py-1 bg-emerald-600/80 hover:bg-emerald-600 text-white rounded text-[11px] font-medium shrink-0">复制密码</button>' +
                     '</div>' +
                   '</div>'
                  : '<div class="text-xs font-mono text-amber-400 bg-slate-950 p-2.5 rounded border border-slate-800">待付款/待提卡</div>') +
@@ -1618,7 +1618,7 @@ function getAdminHTML(env) {
                   '<div class="text-amber-400 font-bold">' + o.pay_type + ' | 精准金额: ￥' + o.price + '</div>' +
                   '<div class="text-slate-500">' + o.created_at + '</div>' +
                 '</div>' +
-                '<button onclick="approveOrder(\'' + o.order_no + '\')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs shadow-lg flex items-center gap-1">' +
+                '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs shadow-lg flex items-center gap-1">' +
                   '<i class="fa-solid fa-check"></i> 手动发卡' +
                 '</button>' +
               '</div>';
