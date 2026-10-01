@@ -55,18 +55,22 @@ export default {
 
         let qrcode = env.PAY_QRCODE_URL || "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
+        let currentSiteName = env.SITE_NAME || "小火箭账号";
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrRow && qrRow.value) qrcode = qrRow.value;
 
           const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
           if (priceRow && priceRow.value) currentPrice = priceRow.value;
+
+          const siteRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
+          if (siteRow && siteRow.value) currentSiteName = siteRow.value;
         } catch (e) {}
 
         return jsonResponse({
           code: 0,
           data: Object.values(regionMap),
-          site_name: env.SITE_NAME || "小火箭账号",
+          site_name: currentSiteName,
           price: parseFloat(currentPrice).toFixed(2),
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
@@ -268,12 +272,16 @@ export default {
 
         let currentQrcode = "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
+        let currentSiteName = env.SITE_NAME || "小火箭账号";
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrSetting) currentQrcode = qrSetting.value;
 
           const priceSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
           if (priceSetting) currentPrice = priceSetting.value;
+
+          const siteSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
+          if (siteSetting) currentSiteName = siteSetting.value;
         } catch (e) {}
 
         return jsonResponse({
@@ -281,7 +289,8 @@ export default {
           pending: pendingOrders.results || [],
           recent: recentPaid.results || [],
           qrcode: currentQrcode,
-          price: parseFloat(currentPrice).toFixed(2)
+          price: parseFloat(currentPrice).toFixed(2),
+          site_name: currentSiteName
         }, corsHeaders);
       }
 
@@ -306,7 +315,32 @@ export default {
 
         return jsonResponse({
           code: 0,
-          msg: `🎉 销售金额已设置为：￥${price.toFixed(2)}！`
+          msg: `🎉 销售单价已成功设置为：￥${price.toFixed(2)}！`
+        }, corsHeaders);
+      }
+
+      // 路由 6.5: 管理员后台 - 修改网站名称
+      if (path === "/api/admin/set_site_name" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (key !== (env.ADMIN_KEY || "51245124")) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const siteName = (body.site_name || "").trim();
+        if (!siteName) {
+          return jsonResponse({ code: -1, msg: "网站名称不能为空" }, corsHeaders);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('SITE_NAME', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(siteName).run();
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 网站名称已修改为：${siteName}`
         }, corsHeaders);
       }
 
@@ -619,7 +653,7 @@ function getFrontendHTML(env) {
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-3 border border-indigo-500/30">
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
-      <h1 class="text-3xl font-bold tracking-tight text-white mb-2">${siteName}</h1>
+      <h1 class="text-3xl font-bold tracking-tight text-white mb-2" id="site-header-title">${siteName}</h1>
       <p class="text-slate-400 text-sm">24小时极速出卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
     </div>
 
@@ -940,6 +974,11 @@ function getFrontendHTML(env) {
           loadedRegions = json.data;
           document.getElementById("display-price").innerText = "￥" + json.price;
           if (json.pay_qrcode) document.getElementById("pay-qr-img").src = json.pay_qrcode;
+          if (json.site_name) {
+            document.title = json.site_name + " - 自动发卡网";
+            var headerTitle = document.getElementById("site-header-title");
+            if (headerTitle) headerTitle.innerText = json.site_name;
+          }
           renderRegions();
         }
       } catch (e) {
@@ -1338,37 +1377,74 @@ function getAdminHTML(env) {
       </div>
     </div>
 
-    <!-- 设置销售价格 -->
-    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-      <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
-        <i class="fa-solid fa-tag"></i> 设置单价 (元)
-      </h2>
-      <div class="flex gap-2">
-        <div class="relative flex-1">
-          <span class="absolute left-3 top-2 text-slate-400 text-xs">￥</span>
-          <input type="number" id="price-input" step="0.01" min="0.01" placeholder="4.99" class="w-full pl-7 pr-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-400">
-        </div>
-        <button onclick="savePrice()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs">
-          保存
-        </button>
+    <!-- ⚙️ 系统与价格设置 (核心配置) -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <h2 class="font-bold text-indigo-400 flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-sliders"></i> 系统与价格设置
+        </h2>
+        <span class="text-[11px] text-slate-500">修改后前台实时生效</span>
       </div>
-    </div>
 
-    <!-- 上传微信收款码图片 -->
-    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-      <h2 class="font-bold text-emerald-400 flex items-center gap-2 text-sm">
-        <i class="fa-solid fa-image"></i> 设置微信收款码
-      </h2>
-      <div class="flex gap-3 items-center">
-        <div class="w-16 h-16 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
-          <img id="current-qrcode-preview" src="" alt="收款码" class="w-full h-full object-contain hidden">
-          <span id="no-qrcode-text" class="text-[10px] text-slate-500">未设置</span>
+      <!-- 1. 设置销售单价 -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-tag text-emerald-400"></i> 设置账号销售单价 (元)
+          </label>
+          <span class="text-emerald-400 font-mono text-[11px]" id="current-price-badge">当前价格: ￥4.99</span>
         </div>
-        <div class="flex-1 space-y-1.5">
-          <input type="file" id="qrcode-file-input" accept="image/*" class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-indigo-600 file:text-white cursor-pointer">
-          <button onclick="uploadQrcode()" id="btn-upload-qr" class="w-full px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs">
-            <i class="fa-solid fa-cloud-arrow-up"></i> 保存收款码
+        
+        <!-- 快捷价格预设按钮 -->
+        <div class="flex flex-wrap gap-1.5">
+          <button type="button" onclick="setQuickPrice('1.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥1.99</button>
+          <button type="button" onclick="setQuickPrice('2.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥2.99</button>
+          <button type="button" onclick="setQuickPrice('3.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥3.99</button>
+          <button type="button" onclick="setQuickPrice('4.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥4.99</button>
+          <button type="button" onclick="setQuickPrice('6.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥6.99</button>
+          <button type="button" onclick="setQuickPrice('9.99')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-mono border border-slate-700 transition">￥9.99</button>
+        </div>
+
+        <div class="flex gap-2">
+          <div class="relative flex-1">
+            <span class="absolute left-3 top-2 text-slate-400 text-xs">￥</span>
+            <input type="number" id="price-input" step="0.01" min="0.01" placeholder="4.99" class="w-full pl-7 pr-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-bold text-emerald-400">
+          </div>
+          <button onclick="savePrice()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+            <i class="fa-solid fa-floppy-disk"></i> 保存价格
           </button>
+        </div>
+      </div>
+
+      <!-- 2. 设置网站标题 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
+          <i class="fa-solid fa-heading text-indigo-400"></i> 网站前台标题名称
+        </label>
+        <div class="flex gap-2">
+          <input type="text" id="sitename-input" placeholder="例如：小火箭独享账号" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          <button onclick="saveSiteName()" class="px-4 py-1.5 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+            <i class="fa-solid fa-floppy-disk"></i> 保存名称
+          </button>
+        </div>
+      </div>
+
+      <!-- 3. 设置微信收款码 -->
+      <div class="space-y-2 pt-2 border-t border-slate-800/80">
+        <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
+          <i class="fa-solid fa-qrcode text-emerald-400"></i> 微信收款二维码图片
+        </label>
+        <div class="flex gap-3 items-center">
+          <div class="w-16 h-16 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+            <img id="current-qrcode-preview" src="" alt="收款码" class="w-full h-full object-contain hidden">
+            <span id="no-qrcode-text" class="text-[10px] text-slate-500">未设置</span>
+          </div>
+          <div class="flex-1 space-y-1.5">
+            <input type="file" id="qrcode-file-input" accept="image/*" class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-indigo-600 file:text-white cursor-pointer">
+            <button onclick="uploadQrcode()" id="btn-upload-qr" class="w-full px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1">
+              <i class="fa-solid fa-cloud-arrow-up"></i> 保存收款码
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1422,6 +1498,13 @@ function getAdminHTML(env) {
         if (json.code === 0) {
           if (json.price) {
             document.getElementById("price-input").value = json.price;
+            var priceBadge = document.getElementById("current-price-badge");
+            if (priceBadge) priceBadge.innerText = "当前价格: ￥" + json.price;
+          }
+
+          if (json.site_name) {
+            var siteInput = document.getElementById("sitename-input");
+            if (siteInput && !siteInput.value) siteInput.value = json.site_name;
           }
 
           if (json.qrcode) {
@@ -1476,6 +1559,11 @@ function getAdminHTML(env) {
       } catch (e) {}
     }
 
+    function setQuickPrice(val) {
+      document.getElementById("price-input").value = val;
+      savePrice();
+    }
+
     async function approveOrder(orderNo) {
       var key = document.getElementById("admin-key").value.trim();
       if (!confirm("确认已收到买家微信付款，立即为买家发货？")) return;
@@ -1514,6 +1602,25 @@ function getAdminHTML(env) {
         loadAdminData();
       } catch (e) {
         alert("价格保存失败");
+      }
+    }
+
+    async function saveSiteName() {
+      var key = document.getElementById("admin-key").value.trim();
+      var name = document.getElementById("sitename-input").value.trim();
+      if (!name) return alert("请输入网站名称");
+
+      try {
+        var res = await fetch("/api/admin/set_site_name", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, site_name: name })
+        });
+        var json = await res.json();
+        alert(json.msg || "网站名称保存成功");
+        loadAdminData();
+      } catch (e) {
+        alert("保存失败");
       }
     }
 
