@@ -172,24 +172,39 @@ export default {
           return jsonResponse({ code: -1, msg: "该交易单号已被使用，请勿重复提交！" }, corsHeaders);
         }
 
-        // 🌟 核心防白嫖真实验资：比对天翼云电脑推送的 payments 真实到账池
-        let paymentRecord = await env.DB.prepare(
-          "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
-        ).bind(`%${tradeNo}`, tradeNo).first();
+        // 检查后台设置的核销模式 (0=极速自主提卡模式, 1=严格到账池验资模式)
+        let isStrictMode = false;
+        try {
+          const strictSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'STRICT_VERIFY'").first();
+          if (strictSetting && strictSetting.value === "1") isStrictMode = true;
+        } catch (e) {}
 
-        // 如果未匹配到真实到账记录：直接拦截拒绝！
-        if (!paymentRecord) {
-          return jsonResponse({
-            code: -1,
-            msg: "❌ 未匹配到该单号的微信真实到账记录！\n请确认您已成功扫码付款并准确输入单号后4位（如刚付款请等待几秒同步）。"
-          }, corsHeaders);
+        let matchedTradeNo = tradeNo;
+
+        // 如果开启了严格模式，必须在 payments 真实到账池中查找到
+        if (isStrictMode) {
+          let paymentRecord = await env.DB.prepare(
+            "SELECT id, trade_no, amount, status FROM payments WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0 ORDER BY id DESC LIMIT 1"
+          ).bind(`%${tradeNo}`, tradeNo).first();
+
+          if (!paymentRecord) {
+            return jsonResponse({
+              code: -1,
+              msg: "❌ 未匹配到该单号的微信真实到账记录！\n请确认您已成功扫码付款并准确输入单号后4位（如刚付款请等待几秒同步）。"
+            }, corsHeaders);
+          }
+
+          matchedTradeNo = paymentRecord.trade_no;
+          await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
+        } else {
+          // 自主模式：如果有匹配的到账记录则一并核销标记
+          try {
+            await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE (trade_no LIKE ? OR trade_no = ?) AND status = 0").bind(orderNo, `%${tradeNo}`, tradeNo).run();
+          } catch(e) {}
         }
 
-        // 标记该笔到账已被核销使用
-        await env.DB.prepare("UPDATE payments SET status = 1, order_no = ?, used_at = datetime('now') WHERE id = ?").bind(orderNo, paymentRecord.id).run();
-
         // 实时穿透请求原网页抓取最新账号
-        console.log(`⚡ 真实验资通过 (订单 ${orderNo}, 微信真实单号 ${paymentRecord.trade_no})，正在实时从原网页获取最新账号...`);
+        console.log(`⚡ 核验通过 (订单 ${orderNo}, 单号 ${matchedTradeNo})，正在实时从原网页获取最新账号...`);
         const freshAccount = await fetchLatestLiveAccount(env, order.region);
 
         if (!freshAccount || !freshAccount.carmi) {
@@ -203,14 +218,14 @@ export default {
           UPDATE orders 
           SET status = 1, carmi = ?, pay_type = ?, paid_at = datetime('now'), replace_count = 0
           WHERE order_no = ?
-        `).bind(freshAccount.carmi, `微信单号:${paymentRecord.trade_no}`, orderNo).run();
+        `).bind(freshAccount.carmi, `微信单号:${matchedTradeNo}`, orderNo).run();
 
         const updatedOrder = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
         const warranty = getOrderWarrantyInfo(updatedOrder);
 
         return jsonResponse({
           code: 0,
-          msg: "🎉 微信真实到账核验成功！已为您实时获取原网站最新可用账号！",
+          msg: "🎉 微信核验成功！已为您实时获取原网站最新可用账号！",
           data: {
             order_no: orderNo,
             carmi: freshAccount.carmi,
