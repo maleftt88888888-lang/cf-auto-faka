@@ -310,6 +310,7 @@ export default {
         let currentSiteName = env.SITE_NAME || "小火箭账号";
         let pushplusToken = "";
         let categoryPrices = {};
+        let categoryImages = {};
 
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
@@ -329,7 +330,6 @@ export default {
             try { categoryPrices = JSON.parse(catPriceRow.value); } catch(e) {}
           }
 
-          let categoryImages = {};
           const catImgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
           if (catImgRow && catImgRow.value) {
             try { categoryImages = JSON.parse(catImgRow.value); } catch(e) {}
