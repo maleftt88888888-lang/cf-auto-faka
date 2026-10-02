@@ -155,6 +155,16 @@ export default {
         const region = body.region || "美国";
         const contact = (body.contact || "").trim();
         const couponCode = (body.coupon_code || "").trim().toUpperCase();
+        const quantity = Math.max(1, parseInt(body.quantity) || 1);
+        const payMethod = (body.pay_method || "微信支付").trim();
+
+        // 校验邮箱格式（当联系方式填写时进行验证）
+        if (contact) {
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(contact)) {
+            return jsonResponse({ code: -1, msg: "请输入有效的邮箱地址（例如: user@qq.com）" }, corsHeaders);
+          }
+        }
 
         // 防刷频控：限制同一时间段内大量生成未支付订单
         try {
@@ -162,7 +172,7 @@ export default {
             SELECT COUNT(*) as cnt FROM orders 
             WHERE status = 0 AND created_at > datetime('now', '+8 hours', '-10 minutes')
           `).first();
-          if (recentPending && recentPending.cnt >= 25) {
+          if (recentPending && recentPending.cnt >= 35) {
             return jsonResponse({ code: -1, msg: "系统排队繁忙，请稍后再试或先完成已有订单！" }, corsHeaders);
           }
         } catch(e) {}
@@ -172,8 +182,8 @@ export default {
           "SELECT COUNT(*) as cnt FROM carmis WHERE (region = ? OR region = '通用') AND status = 0"
         ).bind(region).first();
 
-        if (!countRes || countRes.cnt <= 0) {
-          return jsonResponse({ code: -1, msg: `当前【${region}】库存不足，请稍后再试或联系站长补货！` }, corsHeaders);
+        if (!countRes || countRes.cnt < quantity) {
+          return jsonResponse({ code: -1, msg: `当前【${region}】库存不足（仅剩 ${countRes ? countRes.cnt : 0} 个），请减少购买数量或联系站长补货！` }, corsHeaders);
         }
 
         let basePriceStr = env.PRICE_PER_ACCOUNT || "4.99";
@@ -187,22 +197,23 @@ export default {
             if (catMap && catMap[region]) basePriceStr = catMap[region];
           }
         } catch (e) {}
-        const price = parseFloat(basePriceStr);
-        let finalPrice = price;
+        const unitPrice = parseFloat(basePriceStr);
+        let rawPrice = unitPrice * quantity;
+        let finalPrice = rawPrice;
 
         if (couponCode) {
           try {
             const coupon = await env.DB.prepare("SELECT * FROM coupons WHERE code = ? AND status = 1").bind(couponCode).first();
-            if (coupon && (coupon.max_uses === -1 || coupon.used_count < coupon.max_uses) && price >= (coupon.min_amount || 0)) {
+            if (coupon && (coupon.max_uses === -1 || coupon.used_count < coupon.max_uses) && rawPrice >= (coupon.min_amount || 0)) {
               let discount = 0;
               if (coupon.discount_type === 'percent') {
-                discount = price * (1 - coupon.discount_val / 100);
+                discount = rawPrice * (1 - coupon.discount_val / 100);
               } else {
                 discount = coupon.discount_val;
               }
-              discount = Math.min(Math.max(0, price - 0.01), discount);
+              discount = Math.min(Math.max(0, rawPrice - 0.01), discount);
               if (discount > 0) {
-                finalPrice = Math.max(0.01, price - discount);
+                finalPrice = Math.max(0.01, rawPrice - discount);
                 await env.DB.prepare("UPDATE coupons SET used_count = used_count + 1 WHERE id = ?").bind(coupon.id).run();
               }
             }
@@ -215,7 +226,7 @@ export default {
         await env.DB.prepare(`
           INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count, coupon_code)
           VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0, ?)
-        `).bind(orderNo, region, contact, finalPrice, `核销码:${checkCode}`, couponCode).run();
+        `).bind(orderNo, region, contact, finalPrice.toFixed(2), `[${payMethod}] 核销码:${checkCode}`, couponCode).run();
 
         return jsonResponse({
           code: 0,
@@ -224,11 +235,46 @@ export default {
             order_no: orderNo,
             check_code: checkCode,
             price: finalPrice.toFixed(2),
-            original_price: price.toFixed(2),
+            unit_price: unitPrice.toFixed(2),
+            quantity: quantity,
+            pay_method: payMethod,
+            original_price: rawPrice.toFixed(2),
             region: region,
             coupon_code: couponCode
           }
         }, corsHeaders);
+      }
+
+      // 路由 2.3: 发送卡密到买家邮箱
+      if (path === "/api/order/send_email" && request.method === "POST") {
+        const body = await request.json();
+        const orderNo = (body.order_no || "").trim();
+        const email = (body.email || "").trim();
+
+        if (!orderNo || !email) {
+          return jsonResponse({ code: -1, msg: "缺少订单号或接收邮箱" }, corsHeaders);
+        }
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          return jsonResponse({ code: -1, msg: "请输入有效的邮箱格式（例如: user@qq.com）" }, corsHeaders);
+        }
+
+        const order = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ?").bind(orderNo).first();
+        if (!order) return jsonResponse({ code: -1, msg: "订单不存在" }, corsHeaders);
+        if (order.status !== 1 || !order.carmi) {
+          return jsonResponse({ code: -1, msg: "订单尚未出卡，请等待发卡完成" }, corsHeaders);
+        }
+
+        try {
+          ctx.waitUntil(sendCarmiEmail(env, order, order.carmi, email, url.origin));
+          try {
+            await env.DB.prepare("UPDATE orders SET email_sent = 1, contact = ? WHERE order_no = ?").bind(email, orderNo).run();
+          } catch(e) {}
+          return jsonResponse({ code: 0, msg: `🎉 卡密已成功发送至邮箱：${email}！请查收收件箱或垃圾箱。` }, corsHeaders);
+        } catch(err) {
+          return jsonResponse({ code: -1, msg: "邮件发送失败: " + err.message }, corsHeaders);
+        }
       }
 
       // 路由 2.5: 买家点击“我已付款，通知站长发货”
@@ -1054,6 +1100,9 @@ async function ensureDbMigrated(env) {
     await env.DB.prepare("ALTER TABLE orders ADD COLUMN coupon_code TEXT DEFAULT ''").run();
   } catch (e) {}
   try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN email_sent INTEGER DEFAULT 0").run();
+  } catch (e) {}
+  try {
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS coupons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1068,6 +1117,128 @@ async function ensureDbMigrated(env) {
       )
     `).run();
   } catch (e) {}
+}
+
+/**
+ * 解析卡密中的账号与密码
+ */
+function parseCarmiServer(raw) {
+  if (!raw) return { account: "", password: "", raw: "" };
+  let account = "";
+  let password = "";
+
+  const accMatch = raw.match(/账号:\s*([^\s-]+)/);
+  if (accMatch) account = accMatch[1].trim();
+
+  const pwdMatch = raw.match(/密码:\s*(.+)$/);
+  if (pwdMatch) password = pwdMatch[1].trim();
+
+  if (!account && !password) {
+    if (raw.includes("----")) {
+      const parts = raw.split("----");
+      account = parts[0].replace(/【.*?】/g, "").replace("账号:", "").trim();
+      password = parts[1].replace("密码:", "").trim();
+    } else {
+      account = raw;
+    }
+  }
+
+  return { account: account || raw, password: password || "--", raw: raw };
+}
+
+/**
+ * 发送卡密到买家邮箱 (MailChannels / Resend 智能多通道)
+ */
+async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
+  if (!toEmail) return { success: false, msg: "邮箱为空" };
+  const siteName = env.SITE_NAME || "小火箭账号";
+  const parsed = parseCarmiServer(carmiText);
+  const account = parsed.account || carmiText;
+  const password = parsed.password || "--";
+  const siteUrl = origin || "https://faka.medpic.eu.cc";
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${siteName} - 订单卡密发货通知</title>
+    </head>
+    <body style="margin:0;padding:20px;background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e2e8f0;">
+      <div style="max-width:580px;margin:0 auto;background:#1e293b;border-radius:18px;overflow:hidden;border:1px solid #334155;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+        <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:28px 24px;text-align:center;color:#ffffff;">
+          <div style="font-size:26px;margin-bottom:6px;">🚀</div>
+          <h1 style="margin:0;font-size:22px;font-weight:bold;letter-spacing:-0.5px;">${siteName} · 卡密交付凭证</h1>
+          <p style="margin:8px 0 0 0;font-size:13px;opacity:0.9;">感谢您的信任与支持，您的专属账号卡密已交付！</p>
+        </div>
+        <div style="padding:24px 20px;">
+          <!-- 订单基本信息卡片 -->
+          <div style="background:#0f172a;border-radius:14px;padding:16px 18px;border:1px solid #334155;margin-bottom:20px;">
+            <table style="width:100%;font-size:13px;line-height:1.9;color:#94a3b8;">
+              <tr><td style="width:85px;color:#64748b;"><b>订单编号：</b></td><td style="font-family:monospace;color:#a5b4fc;font-weight:bold;">${order.order_no}</td></tr>
+              <tr><td style="color:#64748b;"><b>商品名称：</b></td><td style="color:#f8fafc;font-weight:bold;">${order.region} 独享 Apple ID (免费下载小火箭)</td></tr>
+              <tr><td style="color:#64748b;"><b>支付金额：</b></td><td style="color:#34d399;font-weight:bold;font-size:15px;">￥${order.price}</td></tr>
+              <tr><td style="color:#64748b;"><b>发货时间：</b></td><td>${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</td></tr>
+            </table>
+          </div>
+
+          <!-- 卡密主体卡片 -->
+          <div style="margin-bottom:22px;">
+            <div style="font-size:14px;font-weight:bold;color:#f8fafc;margin-bottom:12px;display:flex;align-items:center;">
+              🔑 您的专属账号卡密详情：
+            </div>
+            
+            <div style="background:#0f172a;border:1px solid #3b82f6;border-radius:12px;padding:14px 16px;margin-bottom:12px;">
+              <div style="font-size:11px;color:#93c5fd;font-weight:bold;margin-bottom:4px;">Apple ID 账号 (邮箱)</div>
+              <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#ffffff;word-break:break-all;user-select:all;">${account}</div>
+            </div>
+
+            <div style="background:#0f172a;border:1px solid #10b981;border-radius:12px;padding:14px 16px;">
+              <div style="font-size:11px;color:#6ee7b7;font-weight:bold;margin-bottom:4px;">登录密码</div>
+              <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#34d399;word-break:break-all;user-select:all;">${password}</div>
+            </div>
+          </div>
+
+          <!-- 3步新手使用必读指引 -->
+          <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:14px;padding:16px;margin-bottom:22px;font-size:12px;color:#fde68a;line-height:1.7;">
+            <b style="color:#fbbf24;font-size:13px;display:block;margin-bottom:6px;">⚠️ 新手上路 3 步指南（必读）：</b>
+            1. 打开手机 <b>App Store</b>（应用商店），点击右上角头像滑到最底部退出当前账号，粘贴上方账号和密码登录。<br>
+            2. <b>严禁在手机系统【设置/iCloud】中登录共享账号！</b>切勿开启 iCloud 同步。<br>
+            3. 若弹出“双重认证 / Apple ID 安全”，请选择<b>【其他选项】➔【不升级】</b>即可直接搜索下载小火箭！<br>
+            4. 本订单享受 <b>2小时售后质保</b>，如遇密码错误等异常，可随时前往官网自助换号。
+          </div>
+
+          <!-- 官网查单售后按钮 -->
+          <div style="text-align:center;padding-top:6px;">
+            <a href="${siteUrl}" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#4f46e5,#6366f1);color:#ffffff;text-decoration:none;border-radius:12px;font-size:14px;font-weight:bold;box-shadow:0 4px 14px rgba(79,70,229,0.4);">👉 访问官网查询 / 售后换号</a>
+          </div>
+        </div>
+
+        <div style="background:#0f172a;padding:14px;text-align:center;font-size:11px;color:#64748b;border-top:1px solid #334155;">
+          ${siteName} · 24小时自动出卡系统 · 本邮件由系统自动发出，请妥善保管卡密
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    await fetch("https://api.mailchannels.net/tx/v1/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: toEmail, name: "Customer" }] }],
+        from: { email: `faka-notify@mailchannels.net`, name: siteName },
+        subject: `【${siteName}】您的订单卡密发货凭证 - 单号: ${order.order_no}`,
+        content: [{ type: "text/html", value: htmlContent }]
+      })
+    });
+    return { success: true };
+  } catch (err) {
+    console.error("邮件发送异常:", err);
+    return { success: false, error: err.message };
+  }
 }
 
 /**
@@ -1564,11 +1735,170 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
+    <!-- 弹窗 0：独立商品购买与结算详情弹窗 (根据发卡台标准UI 100%还原) -->
+    <div id="modal-checkout" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden flex items-center justify-center p-3 sm:p-4 z-50 overflow-y-auto">
+      <div class="glass max-w-lg w-full rounded-2xl p-5 sm:p-7 shadow-2xl space-y-4 border border-indigo-500/40 my-auto text-slate-200 relative animate-in fade-in zoom-in-95 duration-200">
+        <!-- 关闭按钮 -->
+        <button onclick="closeCheckoutModal()" class="absolute right-4 top-4 text-slate-400 hover:text-white text-lg w-8 h-8 rounded-full bg-slate-800/70 hover:bg-slate-700 flex items-center justify-center transition z-10">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+
+        <!-- 标题与分享 -->
+        <div class="text-center pt-1">
+          <h2 id="co-product-title" class="text-xl sm:text-2xl font-black text-white tracking-tight">租号下载小火箭</h2>
+          <div class="mt-1">
+            <a href="javascript:void(0)" onclick="shareCurrentProduct()" class="text-indigo-400 hover:text-indigo-300 text-xs inline-flex items-center gap-1 font-medium transition">
+              <i class="fa-solid fa-share-nodes"></i> 将宝贝分享给好友
+            </a>
+          </div>
+        </div>
+
+        <!-- 使用说明与说明卡片 -->
+        <div class="p-3.5 rounded-xl bg-slate-950/80 border border-indigo-500/20 text-xs space-y-2 text-slate-300">
+          <div class="space-y-1 text-slate-300 leading-relaxed text-[12px]">
+            <div>买后发一个链接给你，用浏览器访问，获取苹果ID和密码</div>
+            <div class="text-rose-400 font-medium">仅限自用，禁止分享，违规封禁</div>
+            <div>可免费下载：<b>小火箭 (Shadowrocket)</b></div>
+          </div>
+          <div class="pt-1.5 border-t border-slate-800/80 space-y-1 text-[11px] text-slate-400">
+            <div class="font-bold text-amber-300 flex items-center gap-1">
+              📌 使用说明：
+            </div>
+            <div class="pl-2 space-y-0.5">
+              <div class="flex items-center gap-1">
+                <span>• 🔒 <b>卡密链接说明</b></span>
+              </div>
+              <div class="pl-4 text-slate-400">
+                • 卡密链接 5 小时有效<br>
+                • 可用提取 5 次账号（3次火箭id+2次美区ID）
+              </div>
+              <div class="text-amber-400/90 font-medium pt-1">
+                ⚠️ 禁止登录账号设置，否则后果自负，租赁不退款。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 规格与表单项 -->
+        <div class="space-y-3 text-xs">
+          <!-- 单价与发货方式 -->
+          <div class="grid grid-cols-2 gap-3">
+            <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">商品单价：</span>
+              <span class="text-emerald-400 font-extrabold text-base font-mono" id="co-unit-price">¥9.00</span>
+            </div>
+            <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+              <span class="text-slate-400">发货方式：</span>
+              <span class="px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold text-[11px] border border-emerald-500/30">自动发货</span>
+            </div>
+          </div>
+
+          <!-- 联系方式 / 接收邮箱 (必填项) -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between text-xs">
+              <label class="text-slate-300 font-medium flex items-center gap-1">
+                <span class="text-rose-400 font-bold">*</span> 联系方式：
+              </label>
+              <span class="text-[10px] text-slate-500">点击付款时必须正确填写接收邮箱</span>
+            </div>
+            <input type="email" id="co-email" placeholder="请输入您的邮箱" oninput="clearEmailErr()" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono text-xs transition">
+            <p id="co-email-err" class="text-[10px] text-rose-400 hidden"></p>
+          </div>
+
+          <!-- 优惠代券 -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between text-xs">
+              <label class="text-slate-300 font-medium">优惠代券：</label>
+              <span id="co-coupon-status" class="text-[10px] text-emerald-400 hidden font-bold"></span>
+            </div>
+            <div class="flex gap-2">
+              <input type="text" id="co-coupon" placeholder="没有可不填写" onchange="applyCoCoupon()" class="flex-1 px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 uppercase font-mono text-xs">
+              <button type="button" onclick="applyCoCoupon(true)" class="px-3 py-2 bg-slate-800 hover:bg-pink-600 text-slate-300 hover:text-white rounded-xl text-xs font-bold transition border border-slate-700 shrink-0">
+                使用券
+              </button>
+            </div>
+          </div>
+
+          <!-- 购买数量与库存 -->
+          <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/80 border border-slate-800">
+            <span class="text-slate-300 font-medium">购买数量：</span>
+            <div class="flex items-center gap-3">
+              <div class="flex items-center border border-slate-700 rounded-lg overflow-hidden bg-slate-950">
+                <button type="button" onclick="changeCoQuantity(-1)" class="px-2.5 py-1 text-slate-400 hover:text-white hover:bg-slate-800 text-xs font-bold transition">-</button>
+                <input type="number" id="co-quantity" value="1" min="1" onchange="onCoQuantityChange()" class="w-10 text-center bg-transparent text-white font-mono text-xs border-none focus:outline-none">
+                <button type="button" onclick="changeCoQuantity(1)" class="px-2.5 py-1 text-slate-400 hover:text-white hover:bg-slate-800 text-xs font-bold transition">+</button>
+              </div>
+              <span class="px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-xs font-mono border border-emerald-500/20" id="co-stock-badge">
+                库存: <span id="co-stock-val">993</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- 人机验证 -->
+          <div class="space-y-1">
+            <label class="text-slate-300 font-medium block">人机验证：</label>
+            <div class="flex gap-2">
+              <input type="text" id="co-captcha-input" placeholder="请输入验证码" maxlength="4" class="flex-1 px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono text-center text-xs">
+              <div id="co-captcha-badge" onclick="generateCaptcha()" title="点击刷新验证码" class="px-4 py-2 rounded-xl bg-pink-950/40 border border-pink-500/40 text-pink-300 font-mono font-black text-sm tracking-widest cursor-pointer select-none hover:bg-pink-900/50 flex items-center justify-center shrink-0">
+                9 5 1 5
+              </div>
+            </div>
+          </div>
+
+          <!-- 订单金额 -->
+          <div class="p-3 bg-gradient-to-r from-emerald-950/30 to-indigo-950/30 border border-emerald-500/30 rounded-xl flex items-center justify-between">
+            <span class="text-xs text-slate-300 font-medium">订单金额：</span>
+            <span class="text-2xl font-extrabold text-emerald-400 font-mono" id="co-total-amount">¥9.00</span>
+          </div>
+
+          <div class="flex items-center justify-between text-xs px-1">
+            <label class="flex items-center gap-2 text-slate-300 cursor-pointer select-none">
+              <input type="checkbox" id="co-auto-email" checked class="rounded bg-slate-800 border-slate-700 text-indigo-600 focus:ring-0">
+              <span class="text-[11px] text-slate-400">商品卡密提取成功后自动发送到上方邮箱 (可自由选择)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 💳 付款方式按钮组 (完全还原截图) -->
+        <div class="space-y-2 pt-2 border-t border-slate-800">
+          <div class="text-xs font-bold text-slate-300 flex items-center gap-1.5 mb-1.5">
+            <i class="fa-solid fa-credit-card text-indigo-400"></i> 💳 付款 (点击付款方式结算)：
+          </div>
+          <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            <button type="button" onclick="handlePayClick('Alipay')" class="p-2 rounded-xl bg-[#1677ff] hover:bg-[#4096ff] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-brands fa-alipay text-sm"></i>
+              <span>Alipay</span>
+            </button>
+            <button type="button" onclick="handlePayClick('USDT')" class="p-2 rounded-xl bg-[#26a17b] hover:bg-[#208b6a] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-solid fa-t text-xs"></i>
+              <span>USDT</span>
+            </button>
+            <button type="button" onclick="handlePayClick('TRX')" class="p-2 rounded-xl bg-[#eb0029] hover:bg-[#ff3355] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-solid fa-gem text-xs"></i>
+              <span>TRX</span>
+            </button>
+            <button type="button" onclick="handlePayClick('BEP20')" class="p-2 rounded-xl bg-slate-950 border border-[#f0b90b]/60 hover:bg-slate-900 text-[#f0b90b] font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-solid fa-cube text-xs"></i>
+              <span>BEP20</span>
+            </button>
+            <button type="button" onclick="handlePayClick('ERC20')" class="p-2 rounded-xl bg-[#627eea] hover:bg-[#7b92ff] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-brands fa-ethereum text-sm"></i>
+              <span>ERC20</span>
+            </button>
+            <button type="button" onclick="handlePayClick('微信支付')" class="p-2 rounded-xl bg-[#07c160] hover:bg-[#06ae56] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
+              <i class="fa-brands fa-weixin text-sm"></i>
+              <span>WX4.5%</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 弹窗 1：扫码付款与极速发货等待弹窗 -->
     <div id="modal-pay" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
       <div class="glass max-w-sm w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40 text-center">
         <h3 class="text-base font-bold text-white flex items-center justify-center gap-1.5">
-          <i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> 微信扫码付款
+          <i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> <span id="pay-modal-title">付款与出卡</span>
         </h3>
 
         <!-- 应付金额 -->
@@ -1580,7 +1910,7 @@ function getFrontendHTML(env) {
 
         <!-- 收款二维码 -->
         <div class="p-2 bg-white rounded-xl inline-block shadow-inner mx-auto max-w-[190px] max-h-[190px]">
-          <img id="pay-qr-img" src="" alt="微信收款码" class="w-40 h-40 rounded-lg object-contain mx-auto">
+          <img id="pay-qr-img" src="" alt="收款码" class="w-40 h-40 rounded-lg object-contain mx-auto">
         </div>
 
         <!-- 提交付款状态区 -->
@@ -1592,7 +1922,7 @@ function getFrontendHTML(env) {
             </button>
           </div>
           <div class="text-[11px] text-slate-400 leading-tight">
-            * 扫码付款后点击上方按钮，系统将自动核实并在数秒内在此页面为您弹出账号密码！
+            * 付款后点击上方按钮，系统核实后将自动在此页面秒级弹出卡密！
           </div>
         </div>
 
@@ -1614,8 +1944,8 @@ function getFrontendHTML(env) {
     </div>
 
     <!-- 弹窗 2：发卡成功结果 (账号密码分别独立显示与单独一键复制) -->
-    <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
-      <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40">
+    <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50 overflow-y-auto">
+      <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40 my-auto">
         <div class="text-center">
           <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-2 border border-emerald-500/30">
             <i class="fa-solid fa-check text-xl"></i>
@@ -1662,6 +1992,20 @@ function getFrontendHTML(env) {
             <span id="warranty-countdown" class="text-slate-400 font-mono flex items-center gap-1">
               <i class="fa-regular fa-clock text-indigo-400"></i> 质保剩余: 计算中...
             </span>
+            <button id="btn-replace" onclick="replaceCarmi()" class="hidden px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[11px] font-bold transition flex items-center gap-1">
+              <i class="fa-solid fa-rotate"></i> 密码错误？换号
+            </button>
+          </div>
+
+          <!-- 接收邮箱与邮件发送控制 (自由选择发送邮箱) -->
+          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1 text-xs">
+              <div class="text-[11px] text-slate-400 mb-0.5">卡密接收邮箱</div>
+              <div id="res-email-disp" class="text-xs font-mono text-indigo-300 truncate font-semibold">--</div>
+            </div>
+            <button onclick="sendCarmiToEmailManual()" id="btn-res-send-email" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 shadow">
+              <i class="fa-solid fa-envelope"></i> 发送/重发至邮箱
+            </button>
           </div>
         </div>
 
@@ -1805,6 +2149,25 @@ function getFrontendHTML(env) {
     var warrantyTimer = null;
     var currentFullCarmi = "";
     var payPollingTimer = null;
+    var currentCaptchaCode = "";
+    var lastBuyerEmail = "";
+    var autoEmailChecked = true;
+    var coDiscount = 0;
+
+    function generateCaptcha() {
+      var digits = [];
+      for (var i = 0; i < 4; i++) {
+        digits.push(Math.floor(Math.random() * 10));
+      }
+      currentCaptchaCode = digits.join("");
+      var badge = document.getElementById("co-captcha-badge");
+      if (badge) {
+        badge.innerHTML = digits.map(function(d, idx) {
+          var rot = (idx % 2 === 0 ? 6 : -6);
+          return '<span style="display:inline-block;transform:rotate(' + rot + 'deg);margin:0 2px;">' + d + '</span>';
+        }).join(" ");
+      }
+    }
 
     function parseCarmi(raw) {
       if (!raw) return { account: "", password: "", raw: "" };
@@ -1855,7 +2218,7 @@ function getFrontendHTML(env) {
       setTimeout(function() {
         toast.classList.remove("opacity-100");
         toast.classList.add("opacity-0");
-      }, 2000);
+      }, 2500);
     }
 
     function copyText(text, successMsg) {
@@ -1981,6 +2344,273 @@ function getFrontendHTML(env) {
       if (modal) modal.classList.add("hidden");
     }
 
+    function openCheckoutModal(region) {
+      currentSelectedRegion = region || currentSelectedRegion || "美国";
+      var regData = loadedRegions.find(function(r) { return r.region === currentSelectedRegion; });
+      var stock = regData ? regData.stock : 999;
+      var price = parseFloat(globalCategoryPrices[currentSelectedRegion] || globalDefaultPrice);
+
+      var titleEl = document.getElementById("co-product-title");
+      if (titleEl) titleEl.innerText = "租号下载小火箭 (" + currentSelectedRegion + ")";
+
+      var unitEl = document.getElementById("co-unit-price");
+      if (unitEl) unitEl.innerText = "¥" + price.toFixed(2);
+
+      var stockVal = document.getElementById("co-stock-val");
+      if (stockVal) stockVal.innerText = stock;
+
+      var qtyEl = document.getElementById("co-quantity");
+      if (qtyEl) qtyEl.value = 1;
+
+      var savedEmail = localStorage.getItem("faka_buyer_email") || "";
+      var emailEl = document.getElementById("co-email");
+      if (emailEl && savedEmail) emailEl.value = savedEmail;
+
+      coDiscount = 0;
+      var couponStatus = document.getElementById("co-coupon-status");
+      if (couponStatus) couponStatus.classList.add("hidden");
+
+      updateCoTotalAmount();
+      generateCaptcha();
+      clearEmailErr();
+
+      var modal = document.getElementById("modal-checkout");
+      if (modal) modal.classList.remove("hidden");
+    }
+
+    function closeCheckoutModal() {
+      var modal = document.getElementById("modal-checkout");
+      if (modal) modal.classList.add("hidden");
+    }
+
+    function shareCurrentProduct() {
+      var url = window.location.origin + window.location.pathname + "?buy=" + encodeURIComponent(currentSelectedRegion);
+      copyText(url, "🎉 宝贝链接已复制，快去分享给好友吧！");
+    }
+
+    function changeCoQuantity(delta) {
+      var qtyEl = document.getElementById("co-quantity");
+      if (!qtyEl) return;
+      var val = parseInt(qtyEl.value) || 1;
+      val = Math.max(1, val + delta);
+      qtyEl.value = val;
+      updateCoTotalAmount();
+    }
+
+    function onCoQuantityChange() {
+      var qtyEl = document.getElementById("co-quantity");
+      if (!qtyEl) return;
+      var val = parseInt(qtyEl.value) || 1;
+      qtyEl.value = Math.max(1, val);
+      updateCoTotalAmount();
+    }
+
+    function updateCoTotalAmount() {
+      var unitPrice = parseFloat(globalCategoryPrices[currentSelectedRegion] || globalDefaultPrice);
+      var qtyEl = document.getElementById("co-quantity");
+      var qty = parseInt(qtyEl ? qtyEl.value : 1) || 1;
+      var total = Math.max(0.01, (unitPrice * qty) - coDiscount);
+      var totalEl = document.getElementById("co-total-amount");
+      if (totalEl) totalEl.innerText = "¥" + total.toFixed(2);
+    }
+
+    async function applyCoCoupon(notify) {
+      var codeInp = document.getElementById("co-coupon");
+      var code = (codeInp ? codeInp.value : "").trim().toUpperCase();
+      var statusEl = document.getElementById("co-coupon-status");
+      var unitPrice = parseFloat(globalCategoryPrices[currentSelectedRegion] || globalDefaultPrice);
+      var qty = parseInt(document.getElementById("co-quantity").value) || 1;
+      var rawTotal = unitPrice * qty;
+
+      if (!code) {
+        coDiscount = 0;
+        if (statusEl) statusEl.classList.add("hidden");
+        updateCoTotalAmount();
+        return;
+      }
+
+      try {
+        var res = await fetch("/api/coupon/verify?code=" + encodeURIComponent(code) + "&price=" + rawTotal);
+        var json = await res.json();
+        if (json.code === 0 && json.data) {
+          coDiscount = parseFloat(json.data.discount) || 0;
+          if (statusEl) {
+            statusEl.innerText = "已立减 ¥" + coDiscount.toFixed(2);
+            statusEl.classList.remove("hidden");
+          }
+          updateCoTotalAmount();
+          if (notify) showToast("🎉 优惠券有效，已立减 ¥" + coDiscount.toFixed(2) + "！");
+        } else {
+          coDiscount = 0;
+          if (statusEl) statusEl.classList.add("hidden");
+          updateCoTotalAmount();
+          if (notify) alert(json.msg || "优惠券无效");
+        }
+      } catch(e) {
+        if (notify) alert("验证优惠券失败");
+      }
+    }
+
+    function clearEmailErr() {
+      var emailEl = document.getElementById("co-email");
+      var errEl = document.getElementById("co-email-err");
+      if (emailEl) emailEl.classList.remove("border-rose-500", "ring-2", "ring-rose-500/50");
+      if (errEl) errEl.classList.add("hidden");
+    }
+
+    async function handlePayClick(payMethod) {
+      var emailEl = document.getElementById("co-email");
+      var email = (emailEl ? emailEl.value : "").trim();
+      var errEl = document.getElementById("co-email-err");
+      var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+      // 1. 邮箱必填与格式校验
+      if (!email) {
+        if (emailEl) {
+          emailEl.classList.add("border-rose-500", "ring-2", "ring-rose-500/50");
+          emailEl.focus();
+        }
+        if (errEl) {
+          errEl.innerText = "请填写接收卡密的联系邮箱！";
+          errEl.classList.remove("hidden");
+        }
+        showToast("⚠️ 请填写接收卡密的联系邮箱！");
+        return;
+      }
+
+      if (!emailRegex.test(email)) {
+        if (emailEl) {
+          emailEl.classList.add("border-rose-500", "ring-2", "ring-rose-500/50");
+          emailEl.focus();
+        }
+        if (errEl) {
+          errEl.innerText = "邮箱格式不正确（例如: name@example.com）！";
+          errEl.classList.remove("hidden");
+        }
+        showToast("⚠️ 邮箱格式不正确，请重新输入！");
+        return;
+      }
+
+      // 2. 人机验证码校验
+      var capInp = document.getElementById("co-captcha-input");
+      var capVal = (capInp ? capInp.value : "").trim();
+      if (!capVal || capVal !== currentCaptchaCode) {
+        if (capInp) {
+          capInp.classList.add("border-rose-500", "ring-2", "ring-rose-500/50");
+          capInp.focus();
+        }
+        generateCaptcha();
+        showToast("⚠️ 人机验证码错误，请重新输入！");
+        return;
+      }
+
+      // 3. 购买数量与优惠码
+      var qty = parseInt(document.getElementById("co-quantity").value) || 1;
+      var couponCode = (document.getElementById("co-coupon").value || "").trim().toUpperCase();
+      var autoEmail = document.getElementById("co-auto-email").checked;
+
+      // 记住买家邮箱
+      lastBuyerEmail = email;
+      autoEmailChecked = autoEmail;
+      localStorage.setItem("faka_buyer_email", email);
+
+      try {
+        var res = await fetch("/api/order/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            region: currentSelectedRegion,
+            contact: email,
+            quantity: qty,
+            coupon_code: couponCode,
+            pay_method: payMethod
+          })
+        });
+        var data = await res.json();
+        if (data.code === 0) {
+          currentOrderNo = data.data.order_no;
+          localStorage.setItem("faka_recent_order", currentOrderNo);
+          checkSavedRecentOrder();
+
+          closeCheckoutModal();
+
+          var modalTitle = document.getElementById("pay-modal-title");
+          if (modalTitle) modalTitle.innerText = (payMethod || "扫码") + " 付款与出卡";
+
+          document.getElementById("pay-money").innerText = "￥" + data.data.price;
+          document.getElementById("pay-order-no-disp").innerText = currentOrderNo;
+          document.getElementById("pay-note-input").value = "";
+          document.getElementById("pay-action-section").classList.remove("hidden");
+          document.getElementById("pay-waiting-section").classList.add("hidden");
+          document.getElementById("modal-pay").classList.remove("hidden");
+
+          startPayPolling(currentOrderNo);
+        } else {
+          alert(data.msg || "创建订单失败");
+        }
+      } catch (err) {
+        alert("网络连接异常，请重试");
+      }
+    }
+
+    async function sendCarmiToEmailManual(orderNoToUse, emailToUse, isAuto) {
+      var no = orderNoToUse || currentOrderNo;
+      var em = emailToUse || lastBuyerEmail || localStorage.getItem("faka_buyer_email") || "";
+      if (!em) {
+        em = prompt("请输入接收卡密的邮箱地址:", lastBuyerEmail || "");
+        if (!em) return;
+      }
+
+      var btn = document.getElementById("btn-res-send-email");
+      if (btn && !isAuto) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 发送中...';
+      }
+
+      try {
+        var res = await fetch("/api/order/send_email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order_no: no, email: em })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          showToast("📧 卡密已成功发送至邮箱：" + em + "！");
+          var disp = document.getElementById("res-email-disp");
+          if (disp) disp.innerText = em;
+        } else {
+          if (!isAuto) alert(json.msg || "邮件发送失败");
+        }
+      } catch(e) {
+        if (!isAuto) alert("邮件发送异常");
+      } finally {
+        if (btn && !isAuto) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-envelope"></i> 发送/重发至邮箱';
+        }
+      }
+    }
+
+    async function querySendEmail(orderNo, defaultEmail) {
+      var em = prompt("请输入接收卡密的邮箱地址:", defaultEmail || lastBuyerEmail || "");
+      if (!em) return;
+      try {
+        var res = await fetch("/api/order/send_email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order_no: orderNo, email: em })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || "卡密已发送至邮箱！");
+        } else {
+          alert(json.msg || "发送失败");
+        }
+      } catch(e) {
+        alert("发送异常");
+      }
+    }
+
     async function loadStats() {
       try {
         var res = await fetch("/api/stats");
@@ -2049,11 +2679,20 @@ function getFrontendHTML(env) {
           }
 
           renderRegions();
+          checkUrlBuyParam();
         }
       } catch (e) {
         console.error("加载失败", e);
       }
       checkSavedRecentOrder();
+    }
+
+    function checkUrlBuyParam() {
+      var params = new URLSearchParams(window.location.search);
+      var buyRegion = params.get("buy") || params.get("product");
+      if (buyRegion) {
+        openCheckoutModal(buyRegion);
+      }
     }
 
     function checkSavedRecentOrder() {
@@ -2130,11 +2769,20 @@ function getFrontendHTML(env) {
             clearInterval(payPollingTimer);
             document.getElementById("modal-pay").classList.add("hidden");
             document.getElementById("res-order-no").innerText = orderNo;
+
+            var dispEmail = lastBuyerEmail || localStorage.getItem("faka_buyer_email") || "--";
+            var emailDispEl = document.getElementById("res-email-disp");
+            if (emailDispEl) emailDispEl.innerText = dispEmail;
+
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, orderNo);
             document.getElementById("modal-result").classList.remove("hidden");
             showToast("🎉 站长已确认出卡！");
             loadStats();
+
+            if (autoEmailChecked && dispEmail && dispEmail !== "--") {
+              sendCarmiToEmailManual(orderNo, dispEmail, true);
+            }
           }
         } catch (e) {}
       }, 2000);
@@ -2148,6 +2796,10 @@ function getFrontendHTML(env) {
         if (json.code === 0) {
           if (json.status === 1 && json.carmi) {
             document.getElementById("res-order-no").innerText = currentOrderNo;
+            var dispEmail = lastBuyerEmail || localStorage.getItem("faka_buyer_email") || "--";
+            var emailDispEl = document.getElementById("res-email-disp");
+            if (emailDispEl) emailDispEl.innerText = dispEmail;
+
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, currentOrderNo);
             document.getElementById("modal-result").classList.remove("hidden");
@@ -2209,7 +2861,7 @@ function getFrontendHTML(env) {
         card.onclick = function() {
           currentSelectedRegion = r.region;
           updateDisplayPriceForRegion(r.region);
-          renderRegions();
+          openCheckoutModal(r.region);
         };
 
         card.innerHTML = imgHtml + 
@@ -2227,8 +2879,13 @@ function getFrontendHTML(env) {
               '</span>' +
             '</div>' +
             '<div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">' +
-              '<span class="text-[10px] text-slate-500">拍下即出卡</span>' +
-              '<span class="text-emerald-400 font-extrabold font-mono text-sm">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+              '<div>' +
+                '<span class="text-[10px] text-slate-500 mr-1">现货秒出</span>' +
+                '<span class="text-emerald-400 font-extrabold font-mono text-sm">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+              '</div>' +
+              '<button type="button" onclick="event.stopPropagation();openCheckoutModal(\'' + r.region + '\')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">' +
+                '<i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买' +
+              '</button>' +
             '</div>' +
           '</div>';
         container.appendChild(card);
@@ -2236,44 +2893,7 @@ function getFrontendHTML(env) {
     }
 
     async function submitOrder() {
-      var contact = document.getElementById("contact").value.trim();
-      var btn = document.getElementById("btn-submit");
-      btn.disabled = true;
-      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在生成支付单...';
-
-      try {
-        var res = await fetch("/api/order/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            region: currentSelectedRegion, 
-            contact: contact,
-            coupon_code: appliedCouponCode 
-          })
-        });
-        var data = await res.json();
-        if (data.code === 0) {
-          currentOrderNo = data.data.order_no;
-          localStorage.setItem("faka_recent_order", currentOrderNo);
-          checkSavedRecentOrder();
-
-          document.getElementById("pay-money").innerText = "￥" + data.data.price;
-          document.getElementById("pay-order-no-disp").innerText = currentOrderNo;
-          document.getElementById("pay-note-input").value = "";
-          document.getElementById("pay-action-section").classList.remove("hidden");
-          document.getElementById("pay-waiting-section").classList.add("hidden");
-          document.getElementById("modal-pay").classList.remove("hidden");
-
-          startPayPolling(currentOrderNo);
-        } else {
-          alert(data.msg || "创建订单失败");
-        }
-      } catch (err) {
-        alert("网络异常，请重试");
-      } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-qrcode"></i> 立即扫码付款出卡';
-      }
+      openCheckoutModal(currentSelectedRegion);
     }
 
     async function confirmPaidAndNotify() {
@@ -2396,6 +3016,7 @@ function getFrontendHTML(env) {
                 '<div class="flex justify-between items-center text-xs text-slate-500 pt-1 border-t border-slate-800/60">' +
                   '<span>下单: ' + o.created_at + '</span>' +
                   '<div class="flex items-center gap-3">' +
+                    (o.status === 1 ? '<button onclick="querySendEmail(\'' + o.order_no + '\', \'' + (o.contact || '') + '\')" class="text-indigo-400 hover:text-indigo-300 font-medium text-xs flex items-center gap-1"><i class="fa-solid fa-envelope"></i> 发至邮箱</button>' : '') +
                     statusHtml +
                   '</div>' +
                 '</div>' +
