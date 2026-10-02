@@ -1467,8 +1467,32 @@ function getFrontendHTML(env) {
     .card-active { border-color: #6366f1; background: rgba(99, 102, 241, 0.15); box-shadow: 0 0 20px rgba(99, 102, 241, 0.3); }
   </style>
 </head>
-<body class="py-8 px-4 flex flex-col items-center">
+<body class="py-8 px-4 flex flex-col items-center relative">
+  <!-- 页面右上角固定节点购买按钮 (吸顶悬浮) -->
+  <div class="fixed top-4 right-4 z-40 hidden sm:block">
+    <a href="https://888.jiuyundl.com/#/register?code=wGxyxbPP" target="_blank" rel="noopener noreferrer" class="px-4 py-2 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-white font-extrabold rounded-full shadow-2xl text-xs sm:text-sm border border-amber-300/40 transition transform hover:scale-105 active:scale-95 flex items-center gap-1.5 backdrop-blur-md animate-pulse group">
+      <i class="fa-solid fa-bolt-lightning text-amber-200"></i>
+      <span>节点购买</span>
+      <i class="fa-solid fa-arrow-up-right-from-square text-[10px] opacity-80 group-hover:translate-x-0.5 transition"></i>
+    </a>
+  </div>
+
   <div class="max-w-3xl w-full">
+    <!-- 顶部导航与快捷节点购买操作栏 -->
+    <div class="flex items-center justify-between gap-3 mb-4 p-2.5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md shadow-lg">
+      <div class="flex items-center gap-2 text-xs text-indigo-300 font-semibold pl-1">
+        <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+        <span class="text-slate-200">24H 自动发卡</span>
+        <span class="text-slate-500">|</span>
+        <span class="text-emerald-400">现货秒发</span>
+      </div>
+      <a href="https://888.jiuyundl.com/#/register?code=wGxyxbPP" target="_blank" rel="noopener noreferrer" class="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-white font-extrabold rounded-xl shadow-lg shadow-orange-500/25 text-xs border border-amber-300/40 transition transform hover:scale-105 active:scale-95 flex items-center gap-1.5 group">
+        <i class="fa-solid fa-bolt-lightning text-amber-200"></i>
+        <span>节点购买</span>
+        <i class="fa-solid fa-arrow-up-right-from-square text-[10px] opacity-80 group-hover:translate-x-0.5 transition"></i>
+      </a>
+    </div>
+
     <!-- 自动恢复最近订单横幅 -->
     <div id="recent-order-banner" class="hidden mb-4 p-3.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between items-center text-xs">
       <div class="flex items-center gap-2 text-indigo-200">
@@ -2616,11 +2640,14 @@ function getFrontendHTML(env) {
         var res = await fetch("/api/stats");
         var json = await res.json();
         if (json.code === 0) {
-          loadedRegions = json.data;
+          loadedRegions = json.data || [];
           globalDefaultPrice = json.price || "4.99";
           globalCategoryPrices = json.category_prices || {};
           globalCategoryImages = json.category_images || {};
-          if (json.pay_qrcode) document.getElementById("pay-qr-img").src = json.pay_qrcode;
+          if (json.pay_qrcode) {
+            var qrImg = document.getElementById("pay-qr-img");
+            if (qrImg) qrImg.src = json.pay_qrcode;
+          }
           if (json.site_name) {
             document.title = json.site_name + " - 自动发卡网";
             var headerTitle = document.getElementById("site-header-title");
@@ -2680,9 +2707,14 @@ function getFrontendHTML(env) {
 
           renderRegions();
           checkUrlBuyParam();
+        } else {
+          var container = document.getElementById("region-list");
+          if (container) container.innerHTML = '<div class="col-span-full py-8 text-center text-slate-500"><i class="fa-solid fa-triangle-exclamation text-2xl mb-2"></i><div>获取库存失败，请稍后刷新</div></div>';
         }
       } catch (e) {
         console.error("加载失败", e);
+        var container = document.getElementById("region-list");
+        if (container) container.innerHTML = '<div class="col-span-full py-8 text-center text-slate-500"><i class="fa-solid fa-circle-exclamation text-2xl mb-2"></i><div>网络异常，请刷新重试</div></div>';
       }
       checkSavedRecentOrder();
     }
@@ -2699,8 +2731,10 @@ function getFrontendHTML(env) {
       var saved = localStorage.getItem("faka_recent_order");
       if (saved) {
         currentOrderNo = saved;
-        document.getElementById("banner-order-no").innerText = saved;
-        document.getElementById("recent-order-banner").classList.remove("hidden");
+        var bOrderNo = document.getElementById("banner-order-no");
+        var bBanner = document.getElementById("recent-order-banner");
+        if (bOrderNo) bOrderNo.innerText = saved;
+        if (bBanner) bBanner.classList.remove("hidden");
       }
     }
 
@@ -2767,8 +2801,10 @@ function getFrontendHTML(env) {
           var json = await res.json();
           if (json.code === 0 && json.status === 1 && json.carmi) {
             clearInterval(payPollingTimer);
-            document.getElementById("modal-pay").classList.add("hidden");
-            document.getElementById("res-order-no").innerText = orderNo;
+            var modalPay = document.getElementById("modal-pay");
+            if (modalPay) modalPay.classList.add("hidden");
+            var resOrderNo = document.getElementById("res-order-no");
+            if (resOrderNo) resOrderNo.innerText = orderNo;
 
             var dispEmail = lastBuyerEmail || localStorage.getItem("faka_buyer_email") || "--";
             var emailDispEl = document.getElementById("res-email-disp");
@@ -2776,7 +2812,8 @@ function getFrontendHTML(env) {
 
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, orderNo);
-            document.getElementById("modal-result").classList.remove("hidden");
+            var modalRes = document.getElementById("modal-result");
+            if (modalRes) modalRes.classList.remove("hidden");
             showToast("🎉 站长已确认出卡！");
             loadStats();
 
@@ -2795,18 +2832,23 @@ function getFrontendHTML(env) {
         var json = await res.json();
         if (json.code === 0) {
           if (json.status === 1 && json.carmi) {
-            document.getElementById("res-order-no").innerText = currentOrderNo;
+            var resOrderNo = document.getElementById("res-order-no");
+            if (resOrderNo) resOrderNo.innerText = currentOrderNo;
             var dispEmail = lastBuyerEmail || localStorage.getItem("faka_buyer_email") || "--";
             var emailDispEl = document.getElementById("res-email-disp");
             if (emailDispEl) emailDispEl.innerText = dispEmail;
 
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, currentOrderNo);
-            document.getElementById("modal-result").classList.remove("hidden");
+            var modalRes = document.getElementById("modal-result");
+            if (modalRes) modalRes.classList.remove("hidden");
           } else {
-            document.getElementById("pay-money").innerText = "￥" + json.price;
-            document.getElementById("pay-order-no-disp").innerText = currentOrderNo;
-            document.getElementById("modal-pay").classList.remove("hidden");
+            var payMoney = document.getElementById("pay-money");
+            if (payMoney) payMoney.innerText = "￥" + json.price;
+            var payDisp = document.getElementById("pay-order-no-disp");
+            if (payDisp) payDisp.innerText = currentOrderNo;
+            var modalPay = document.getElementById("modal-pay");
+            if (modalPay) modalPay.classList.remove("hidden");
             startPayPolling(currentOrderNo);
           }
         } else {
@@ -2818,6 +2860,7 @@ function getFrontendHTML(env) {
     }
 
     function getRegionMarketingTag(region, idx) {
+      if (!region) return '';
       if (region.indexOf("美国") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-amber-500 to-rose-500 text-white shadow-sm">🔥 爆款榜首</span>';
       if (region.indexOf("香港") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-sm">⚡ 热门推荐</span>';
       if (region.indexOf("日本") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-pink-500/20 text-pink-300 border border-pink-500/30">💎 独享精品</span>';
@@ -2827,11 +2870,12 @@ function getFrontendHTML(env) {
     }
 
     function getFormattedSold(rawSold, region) {
+      var reg = region || "";
       var base = 1280;
-      if (region.indexOf("美国") !== -1) base = 3560;
-      else if (region.indexOf("香港") !== -1) base = 2140;
-      else if (region.indexOf("日本") !== -1) base = 1890;
-      else if (region.indexOf("台湾") !== -1) base = 1420;
+      if (reg.indexOf("美国") !== -1) base = 3560;
+      else if (reg.indexOf("香港") !== -1) base = 2140;
+      else if (reg.indexOf("日本") !== -1) base = 1890;
+      else if (reg.indexOf("台湾") !== -1) base = 1420;
       var total = base + (rawSold || 0);
       if (total >= 1000) {
         return (total / 1000).toFixed(1) + "k+";
@@ -2841,6 +2885,11 @@ function getFrontendHTML(env) {
 
     function renderRegions() {
       var container = document.getElementById("region-list");
+      if (!container) return;
+      if (!loadedRegions || !Array.isArray(loadedRegions) || loadedRegions.length === 0) {
+        container.innerHTML = '<div class="col-span-full py-8 text-center text-slate-500"><i class="fa-solid fa-box-open text-2xl mb-2"></i><div>暂无在售分类</div></div>';
+        return;
+      }
       container.innerHTML = "";
       loadedRegions.forEach(function(r, idx) {
         var isSelected = r.region === currentSelectedRegion || (idx === 0 && !currentSelectedRegion);
@@ -2852,7 +2901,7 @@ function getFrontendHTML(env) {
         var priceForThis = globalCategoryPrices[r.region] || globalDefaultPrice;
         var imgUrl = globalCategoryImages[r.region];
         var imgHtml = imgUrl ? 
-          '<img src="' + imgUrl + '" alt="' + r.region + '" class="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow-sm">' :
+          '<img src="' + imgUrl + '" alt="' + (r.region || "") + '" class="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow-sm">' :
           '<div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>';
 
         var card = document.createElement("div");
@@ -2867,7 +2916,7 @@ function getFrontendHTML(env) {
         card.innerHTML = imgHtml + 
           '<div class="flex-1 min-w-0 space-y-1">' +
             '<div class="flex items-center justify-between gap-1">' +
-              '<span class="font-bold text-xs sm:text-sm text-white truncate">' + r.region + '</span>' +
+              '<span class="font-bold text-xs sm:text-sm text-white truncate">' + (r.region || "") + '</span>' +
               getRegionMarketingTag(r.region, idx) +
             '</div>' +
             '<div class="flex items-center justify-between text-[11px] text-slate-400">' +
@@ -2883,11 +2932,20 @@ function getFrontendHTML(env) {
                 '<span class="text-[10px] text-slate-500 mr-1">现货秒出</span>' +
                 '<span class="text-emerald-400 font-extrabold font-mono text-sm">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
               '</div>' +
-              '<button type="button" onclick="event.stopPropagation();openCheckoutModal(\'' + r.region + '\')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">' +
+              '<button type="button" class="btn-card-buy-action px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">' +
                 '<i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买' +
               '</button>' +
             '</div>' +
           '</div>';
+
+        var buyBtn = card.querySelector(".btn-card-buy-action");
+        if (buyBtn) {
+          buyBtn.onclick = function(e) {
+            e.stopPropagation();
+            openCheckoutModal(r.region);
+          };
+        }
+
         container.appendChild(card);
       });
     }
