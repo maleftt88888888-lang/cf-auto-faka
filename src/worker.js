@@ -2859,9 +2859,14 @@ function getAdminHTML(env) {
   </div>
 
   <script>
+    var urlParams = new URLSearchParams(window.location.search);
+    var urlKey = urlParams.get("key");
     var savedKey = localStorage.getItem("faka_admin_key");
-    if (savedKey) {
-      document.getElementById("admin-key").value = savedKey;
+    var activeKey = urlKey || savedKey || "51245124";
+    var adminKeyInput = document.getElementById("admin-key");
+    if (adminKeyInput) {
+      adminKeyInput.value = activeKey;
+      localStorage.setItem("faka_admin_key", activeKey);
     }
 
     var soundEnabled = localStorage.getItem("faka_sound_enabled") !== "false";
