@@ -1500,23 +1500,31 @@ function getFrontendHTML(env) {
   </div>
 
   <div class="max-w-3xl w-full">
-    <!-- 顶部导航与快捷节点购买操作栏 -->
-    <div class="flex items-center justify-between gap-3 mb-4 p-2.5 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md shadow-lg">
-      <div class="flex items-center gap-2 text-xs text-indigo-300 font-semibold pl-1">
+    <!-- 顶部导航与快捷操作栏 -->
+    <div class="flex items-center justify-between gap-3 mb-3.5 p-2.5 sm:p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md shadow-lg">
+      <div class="flex items-center gap-2 text-xs font-semibold pl-1">
         <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
-        <span class="text-slate-200">24H 自动发卡</span>
-        <span class="text-slate-500">|</span>
-        <span class="text-emerald-400">现货秒发</span>
+        <span class="text-white font-bold tracking-tight text-sm sm:text-base flex items-center gap-1.5" id="site-header-title">
+          <i class="fa-solid fa-cloud-bolt text-indigo-400"></i> ${siteName}
+        </span>
+        <span class="hidden sm:inline text-slate-500">|</span>
+        <span class="hidden sm:inline text-[11px] text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30">24H 现货秒发</span>
       </div>
-      <a href="https://888.jiuyundl.com/#/register?code=wGxyxbPP" target="_blank" rel="noopener noreferrer" class="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-white font-extrabold rounded-xl shadow-lg shadow-orange-500/25 text-xs border border-amber-300/40 transition transform hover:scale-105 active:scale-95 flex items-center gap-1.5 group">
-        <i class="fa-solid fa-bolt-lightning text-amber-200"></i>
-        <span>节点购买</span>
-        <i class="fa-solid fa-arrow-up-right-from-square text-[10px] opacity-80 group-hover:translate-x-0.5 transition"></i>
-      </a>
+      <div class="flex items-center gap-2">
+        <button onclick="switchTab('query')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs border border-slate-700 transition flex items-center gap-1">
+          <i class="fa-solid fa-magnifying-glass text-indigo-400 text-[10px]"></i>
+          <span>查单找回</span>
+        </button>
+        <a href="https://888.jiuyundl.com/#/register?code=wGxyxbPP" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-white font-extrabold rounded-xl shadow-lg shadow-orange-500/25 text-xs border border-amber-300/40 transition transform hover:scale-105 active:scale-95 flex items-center gap-1 group">
+          <i class="fa-solid fa-bolt-lightning text-amber-200"></i>
+          <span>节点购买</span>
+          <i class="fa-solid fa-arrow-up-right-from-square text-[9px] opacity-80 group-hover:translate-x-0.5 transition"></i>
+        </a>
+      </div>
     </div>
 
-    <!-- 自动恢复最近订单横幅 -->
-    <div id="recent-order-banner" class="hidden mb-4 p-3.5 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between items-center text-xs">
+    <!-- 自动恢复最近订单横幅 (若有则展示) -->
+    <div id="recent-order-banner" class="hidden mb-3 p-3 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex justify-between items-center text-xs">
       <div class="flex items-center gap-2 text-indigo-200">
         <i class="fa-solid fa-clock-rotate-left text-indigo-400"></i>
         <span>检测到您有一笔最近的订单：<b id="banner-order-no" class="font-mono text-emerald-400"></b></span>
@@ -1526,131 +1534,41 @@ function getFrontendHTML(env) {
       </button>
     </div>
 
-    <div class="text-center mb-5">
-      <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-3 border border-indigo-500/30">
-        <i class="fa-solid fa-cloud-bolt text-2xl"></i>
-      </div>
-      <h1 class="text-3xl font-bold tracking-tight text-white mb-2" id="site-header-title">${siteName}</h1>
-      <p class="text-slate-400 text-sm">24小时极速出卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
-    </div>
-
-    <!-- 🌟 营销信任核心指标数据大屏 -->
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
-      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-indigo-500/50 transition">
-        <div class="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0 text-base">
-          <i class="fa-solid fa-chart-line"></i>
-        </div>
-        <div class="min-w-0">
-          <div class="text-[11px] text-slate-400">全网累计交付</div>
-          <div class="text-sm sm:text-base font-extrabold text-white font-mono" id="stat-total-sold">18,650+</div>
-        </div>
-      </div>
-      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-emerald-500/50 transition">
-        <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-base">
-          <i class="fa-solid fa-bolt-lightning animate-pulse"></i>
-        </div>
-        <div class="min-w-0">
-          <div class="text-[11px] text-slate-400">平均出卡耗时</div>
-          <div class="text-sm sm:text-base font-extrabold text-emerald-400 font-mono">3.2 秒</div>
-        </div>
-      </div>
-      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-amber-500/50 transition">
-        <div class="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 text-base">
-          <i class="fa-solid fa-shield-halved"></i>
-        </div>
-        <div class="min-w-0">
-          <div class="text-[11px] text-slate-400">售后质保承诺</div>
-          <div class="text-sm sm:text-base font-extrabold text-amber-300">2小时包换</div>
-        </div>
-      </div>
-      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-pink-500/50 transition">
-        <div class="w-10 h-10 rounded-xl bg-pink-500/20 text-pink-400 flex items-center justify-center shrink-0 text-base">
-          <i class="fa-solid fa-star"></i>
-        </div>
-        <div class="min-w-0">
-          <div class="text-[11px] text-slate-400">全网好评满意度</div>
-          <div class="text-sm sm:text-base font-extrabold text-pink-400 font-mono">99.9% ★</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 🔥 今日限时特惠活动倒计时横幅 -->
-    <div class="mb-5 p-3 rounded-2xl bg-gradient-to-r from-pink-500/15 via-purple-500/15 to-indigo-500/15 border border-pink-500/30 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-xl backdrop-blur-md text-xs">
-      <div class="flex items-center gap-2 text-pink-200 font-medium">
-        <span class="px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 font-bold text-[10px] border border-pink-500/40 flex items-center gap-1 shrink-0">
-          <span class="w-1.5 h-1.5 rounded-full bg-pink-400 animate-ping"></span> 今日限时特惠
-        </span>
-        <span class="truncate">全场独享 Apple ID 现货秒发 · 质保升级无忧售后</span>
-      </div>
-      <div class="flex items-center gap-1.5 text-slate-300 font-mono text-[11px] bg-slate-950/70 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
-        <i class="fa-regular fa-clock text-pink-400"></i>
-        <span>距今日特惠结束:</span>
-        <span id="flash-sale-timer" class="text-pink-400 font-bold">05:48:22</span>
-      </div>
-    </div>
-
-    <!-- 顶部公告栏 / 跑马灯 -->
-    <div id="site-announcement-bar" class="hidden mb-5 p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-3 shadow-xl backdrop-blur-md">
-      <div class="w-8 h-8 rounded-xl bg-amber-500/30 text-amber-300 flex items-center justify-center shrink-0 text-sm">
+    <!-- 顶部公告栏 / 跑马灯 (若后台设置则展示) -->
+    <div id="site-announcement-bar" class="hidden mb-3 p-3 rounded-xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5 shadow-xl backdrop-blur-md">
+      <div class="w-6 h-6 rounded-lg bg-amber-500/30 text-amber-300 flex items-center justify-center shrink-0 text-xs">
         <i class="fa-solid fa-bullhorn animate-bounce"></i>
       </div>
       <span id="site-announcement-text" class="flex-1 font-semibold leading-relaxed"></span>
     </div>
 
-    <!-- 顶部重要安全使用须知 (图文指引) -->
-    <div class="mb-6 p-4 sm:p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-md shadow-xl relative overflow-hidden">
-      <div class="absolute -right-6 -bottom-6 text-amber-500/10 text-8xl pointer-events-none">
-        <i class="fa-solid fa-triangle-exclamation"></i>
-      </div>
-      <div class="flex items-center gap-2 mb-3">
-        <span class="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 font-bold text-sm">
-          <i class="fa-solid fa-triangle-exclamation"></i>
-        </span>
-        <h3 class="font-bold text-sm sm:text-base text-amber-300">安全使用须知（必读）</h3>
-      </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-        <div class="p-3 rounded-xl bg-slate-900/80 border border-emerald-500/30 flex items-start gap-3">
-          <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-base">
-            <i class="fa-brands fa-apple"></i>
-          </div>
-          <div>
-            <div class="font-bold text-emerald-400 flex items-center gap-1">
-              <i class="fa-solid fa-circle-check"></i> 仅在 App Store 登录
-            </div>
-            <div class="text-slate-300 mt-0.5 leading-relaxed">
-              打开苹果应用商店（App Store），点击右上角头像退出当前账号并登录购买的账号即可下载。
-            </div>
-          </div>
+    <!-- 🛒 核心商品与在线下单面板 (置顶首屏，方便立即选购) -->
+    <div class="glass rounded-2xl p-4 sm:p-6 shadow-2xl mb-4 border border-indigo-500/30">
+      <div class="flex items-center justify-between border-b border-slate-700/80 pb-3 mb-4">
+        <div class="flex gap-2">
+          <button id="tab-buy" onclick="switchTab('buy')" class="py-1.5 px-4 font-bold text-indigo-400 border-b-2 border-indigo-500 flex items-center gap-1.5 text-xs sm:text-sm">
+            <i class="fa-solid fa-cart-shopping"></i> 在线下单 (现货直发)
+          </button>
+          <button id="tab-query" onclick="switchTab('query')" class="py-1.5 px-4 font-medium text-slate-400 hover:text-slate-200 flex items-center gap-1.5 text-xs sm:text-sm">
+            <i class="fa-solid fa-magnifying-glass"></i> 订单查询 (卡密找回)
+          </button>
         </div>
-        <div class="p-3 rounded-xl bg-slate-900/80 border border-rose-500/30 flex items-start gap-3">
-          <div class="w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 text-base">
-            <i class="fa-solid fa-ban"></i>
-          </div>
-          <div>
-            <div class="font-bold text-rose-400 flex items-center gap-1">
-              <i class="fa-solid fa-circle-xmark"></i> 切勿在设置中登录 iCloud
-            </div>
-            <div class="text-slate-300 mt-0.5 leading-relaxed">
-              严禁在手机系统【设置】或【iCloud】中登录共享账号，避免同步个人数据或导致手机被锁！
-            </div>
-          </div>
+        <div class="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400 font-mono">
+          <i class="fa-regular fa-clock text-pink-400"></i>
+          <span>特惠倒计时:</span>
+          <span id="flash-sale-timer" class="text-pink-400 font-bold">05:48:22</span>
         </div>
       </div>
-    </div>
 
-    <div class="glass rounded-2xl p-6 sm:p-8 shadow-2xl mb-6">
-      <div class="flex border-b border-slate-700 mb-6">
-        <button id="tab-buy" onclick="switchTab('buy')" class="py-2.5 px-6 font-medium text-indigo-400 border-b-2 border-indigo-500 flex items-center gap-2">
-          <i class="fa-solid fa-cart-shopping"></i> 在线下单
-        </button>
-        <button id="tab-query" onclick="switchTab('query')" class="py-2.5 px-6 font-medium text-slate-400 hover:text-slate-200 flex items-center gap-2">
-          <i class="fa-solid fa-magnifying-glass"></i> 订单查询 (随时找回)
-        </button>
-      </div>
-
-      <div id="panel-buy" class="space-y-6">
+      <div id="panel-buy" class="space-y-4">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-3">选择地区分类：</label>
+          <div class="flex items-center justify-between mb-2">
+            <label class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+              <i class="fa-solid fa-layer-group text-indigo-400"></i> 选择商品地区分类：
+            </label>
+            <span class="text-[11px] text-emerald-400 font-medium">点击卡片或“购买”按钮即可结算</span>
+          </div>
+
           <div id="region-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 card-active border-indigo-500 shadow-xl" onclick="currentSelectedRegion='美国';updateDisplayPriceForRegion('美国');openCheckoutModal('美国')">
               <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
@@ -1769,49 +1687,132 @@ function getFrontendHTML(env) {
           </div>
         </div>
 
-        <div>
-          <label class="block text-sm font-medium text-slate-300 mb-2">联系方式 (用于查单/随时找回卡密)：</label>
-          <input type="text" id="contact" placeholder="建议填写您的手机号或QQ/邮箱" class="w-full px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
-        </div>
-
-        <!-- 优惠抵扣码输入框 -->
-        <div class="p-3 bg-slate-900/60 rounded-xl border border-slate-800 space-y-2">
-          <div class="flex items-center justify-between text-xs">
-            <label class="font-medium text-slate-300 flex items-center gap-1.5">
-              <i class="fa-solid fa-ticket text-pink-400"></i> 优惠券 / 折扣码 (选填)：
-            </label>
-            <span id="coupon-applied-badge" class="hidden text-[11px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30"></span>
-          </div>
-          <div class="flex gap-2">
-            <input type="text" id="coupon-code-input" placeholder="输入优惠码 (如 VIP88)" class="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 text-xs font-mono uppercase">
-            <button type="button" onclick="applyCoupon()" id="btn-apply-coupon" class="px-4 py-2 bg-slate-800 hover:bg-pink-600 text-slate-300 hover:text-white font-bold rounded-lg text-xs transition shrink-0 border border-slate-700">
-              验证/使用
-            </button>
-          </div>
-        </div>
-
-        <div class="pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <!-- 快捷查单联系凭证与优惠码 (合入底部) -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
           <div>
-            <span class="text-sm text-slate-400">固定单价：</span>
-            <span class="text-2xl font-bold text-indigo-400" id="display-price">￥4.99</span>
+            <label class="block text-xs font-medium text-slate-300 mb-1.5 flex items-center gap-1">
+              <i class="fa-solid fa-envelope text-indigo-400"></i> 联系邮箱 / 查单凭证 (用于找回卡密)：
+            </label>
+            <input type="text" id="contact" placeholder="建议填写常用邮箱 (如: user@qq.com)" class="w-full px-3 py-2 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-xs">
           </div>
-          <button onclick="submitOrder()" id="btn-submit" class="w-full sm:w-auto px-8 py-3.5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/25 transition duration-200 flex items-center justify-center gap-2">
-            <i class="fa-solid fa-qrcode"></i> 立即扫码付款出卡
+
+          <!-- 优惠抵扣码输入框 -->
+          <div>
+            <div class="flex items-center justify-between mb-1.5 text-xs">
+              <label class="font-medium text-slate-300 flex items-center gap-1">
+                <i class="fa-solid fa-ticket text-pink-400"></i> 优惠券 / 折扣码 (选填)：
+              </label>
+              <span id="coupon-applied-badge" class="hidden text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/30"></span>
+            </div>
+            <div class="flex gap-1.5">
+              <input type="text" id="coupon-code-input" placeholder="输入优惠码 (如 VIP88)" class="flex-1 px-3 py-2 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 text-xs font-mono uppercase">
+              <button type="button" onclick="applyCoupon()" id="btn-apply-coupon" class="px-3 py-2 bg-slate-800 hover:bg-pink-600 text-slate-300 hover:text-white font-bold rounded-xl text-xs transition shrink-0 border border-slate-700">
+                验证
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-slate-700/60 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-400">结算单价：</span>
+            <span class="text-2xl font-bold text-emerald-400 font-mono" id="display-price">￥4.99</span>
+          </div>
+          <button onclick="submitOrder()" id="btn-submit" class="w-full sm:w-auto px-7 py-3 bg-gradient-to-r from-emerald-600 via-emerald-500 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white font-extrabold rounded-xl shadow-lg shadow-emerald-950/60 transition duration-200 flex items-center justify-center gap-2 text-sm active:scale-95 cursor-pointer">
+            <i class="fa-brands fa-weixin text-base"></i> 微信扫码立即结算出卡
           </button>
         </div>
       </div>
 
-      <div id="panel-query" class="space-y-6 hidden">
+      <div id="panel-query" class="space-y-4 hidden">
         <div>
-          <label class="block text-sm font-medium text-slate-300 mb-2">输入订单号或联系方式找回：</label>
+          <label class="block text-xs font-medium text-slate-300 mb-2">输入订单号或联系邮箱/手机随时找回卡密：</label>
           <div class="flex gap-2">
-            <input type="text" id="query-keyword" placeholder="输入订单号 / 手机号 / 邮箱" class="flex-1 px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm">
-            <button onclick="queryOrders()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl transition">
+            <input type="text" id="query-keyword" placeholder="输入订单号 (如 FK...) / 邮箱" class="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-xs sm:text-sm">
+            <button onclick="queryOrders()" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs sm:text-sm transition flex items-center gap-1.5 shrink-0">
               <i class="fa-solid fa-search"></i> 查询找回
             </button>
           </div>
         </div>
         <div id="query-results" class="space-y-3"></div>
+      </div>
+    </div>
+
+    <!-- 必读安全使用须知 (图文指引) -->
+    <div class="mb-4 p-3.5 sm:p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 backdrop-blur-md shadow-xl relative overflow-hidden">
+      <div class="flex items-center gap-2 mb-2.5">
+        <span class="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-amber-500/20 text-amber-400 font-bold text-xs">
+          <i class="fa-solid fa-triangle-exclamation"></i>
+        </span>
+        <h3 class="font-bold text-xs sm:text-sm text-amber-300">安全使用须知（必读）</h3>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+        <div class="p-2.5 rounded-xl bg-slate-900/80 border border-emerald-500/30 flex items-start gap-2.5">
+          <div class="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-sm">
+            <i class="fa-brands fa-apple"></i>
+          </div>
+          <div>
+            <div class="font-bold text-emerald-400 flex items-center gap-1 text-[11px]">
+              <i class="fa-solid fa-circle-check"></i> 仅在 App Store 登录
+            </div>
+            <div class="text-slate-300 text-[11px] mt-0.5 leading-tight">
+              打开苹果应用商店（App Store），点击右上角头像退出当前账号并登录购买的账号即可下载。
+            </div>
+          </div>
+        </div>
+        <div class="p-2.5 rounded-xl bg-slate-900/80 border border-rose-500/30 flex items-start gap-2.5">
+          <div class="w-7 h-7 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0 text-sm">
+            <i class="fa-solid fa-ban"></i>
+          </div>
+          <div>
+            <div class="font-bold text-rose-400 flex items-center gap-1 text-[11px]">
+              <i class="fa-solid fa-circle-xmark"></i> 切勿在设置中登录 iCloud
+            </div>
+            <div class="text-slate-300 text-[11px] mt-0.5 leading-tight">
+              严禁在手机系统【设置】或【iCloud】中登录共享账号，避免同步个人数据或导致手机被锁！
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 🌟 核心指标数据与保障卡片 -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+      <div class="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center gap-2 shadow">
+        <div class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0 text-xs">
+          <i class="fa-solid fa-chart-line"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[10px] text-slate-400">全网累计交付</div>
+          <div class="text-xs font-extrabold text-white font-mono" id="stat-total-sold">18,650+</div>
+        </div>
+      </div>
+      <div class="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center gap-2 shadow">
+        <div class="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-xs">
+          <i class="fa-solid fa-bolt-lightning animate-pulse"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[10px] text-slate-400">平均出卡耗时</div>
+          <div class="text-xs font-extrabold text-emerald-400 font-mono">3.2 秒</div>
+        </div>
+      </div>
+      <div class="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center gap-2 shadow">
+        <div class="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 text-xs">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[10px] text-slate-400">售后质保承诺</div>
+          <div class="text-xs font-extrabold text-amber-300">2小时包换</div>
+        </div>
+      </div>
+      <div class="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex items-center gap-2 shadow">
+        <div class="w-8 h-8 rounded-lg bg-pink-500/20 text-pink-400 flex items-center justify-center shrink-0 text-xs">
+          <i class="fa-solid fa-star"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[10px] text-slate-400">全网好评率</div>
+          <div class="text-xs font-extrabold text-pink-400 font-mono">99.9% ★</div>
+        </div>
       </div>
     </div>
 
