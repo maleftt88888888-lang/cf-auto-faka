@@ -940,8 +940,8 @@ export default {
         return jsonResponse({ code: 0, data: results }, corsHeaders);
       }
 
-      // 路由 10: 管理员后台页面 (/admin)
-      if (path === "/admin") {
+      // 路由 10: 管理员后台页面 (/admin 或隐蔽路径 /admin_vip, /admin_manage)
+      if (path === "/admin" || path === "/admin_vip" || path === "/admin_manage") {
         return new Response(getAdminHTML(env), {
           headers: { 
             "Content-Type": "text/html; charset=utf-8",
@@ -2512,7 +2512,46 @@ function getAdminHTML(env) {
     .pending-alert { animation: pulse-ring 2s infinite; }
   </style>
 </head>
-<body class="p-4 max-w-2xl mx-auto pb-16">
+<body class="p-4 max-w-2xl mx-auto pb-16 relative">
+  <!-- 🔐 管理员安全登录锁屏门禁 (未登录/密码验证未通过时显示) -->
+  <div id="admin-login-modal" class="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-50 flex items-center justify-center p-4">
+    <div class="max-w-sm w-full bg-slate-900/90 border border-indigo-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-5 text-center">
+      <div class="w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center mx-auto text-2xl shadow-inner">
+        <i class="fa-solid fa-shield-halved animate-pulse"></i>
+      </div>
+      <div>
+        <h2 class="text-xl font-extrabold text-white">站长安全管理后台</h2>
+        <p class="text-xs text-slate-400 mt-1">请输入管理员安全访问密钥</p>
+      </div>
+
+      <div class="space-y-3 text-left">
+        <div>
+          <label class="text-[11px] text-slate-400 block mb-1">管理访问密钥</label>
+          <div class="relative">
+            <input type="password" id="gate-password-input" placeholder="输入管理密码 (首次默认 51245124)" onkeydown="if(event.key==='Enter')submitAdminLogin()" class="w-full pl-4 pr-10 py-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
+            <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-3.5 text-slate-400 hover:text-white text-sm">
+              <i class="fa-solid fa-eye" id="eye-icon"></i>
+            </button>
+          </div>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <label class="flex items-center gap-1.5 text-slate-400 cursor-pointer">
+            <input type="checkbox" id="gate-remember-check" checked class="rounded bg-slate-800 border-slate-700 text-indigo-600">
+            <span>在此设备记住密码 (下次免密直达)</span>
+          </label>
+        </div>
+        <div id="gate-error-msg" class="hidden p-2.5 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-300 text-xs text-center"></div>
+      </div>
+
+      <button onclick="submitAdminLogin()" id="btn-gate-login" class="w-full py-3 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-xl shadow-lg transition duration-200 flex items-center justify-center gap-2 text-sm">
+        <i class="fa-solid fa-lock-open"></i> 立即验证进入后台
+      </button>
+      <div class="text-[11px] text-slate-500 text-center">
+        Cloudflare Workers 端对端数据库鉴权保护
+      </div>
+    </div>
+  </div>
+
   <!-- 顶部导航栏 -->
   <div class="mb-4 flex justify-between items-center border-b border-slate-800 pb-3">
     <h1 class="text-lg font-bold flex items-center gap-2 text-indigo-400">
@@ -2525,6 +2564,9 @@ function getAdminHTML(env) {
       <button onclick="playDingDong()" class="px-2 py-1 rounded-lg bg-slate-800 text-slate-300 hover:text-white" title="试听提示音">
         <i class="fa-solid fa-play text-[10px]"></i> 试听
       </button>
+      <button onclick="adminLogout()" class="px-2.5 py-1 rounded-lg bg-slate-800 text-rose-400 hover:bg-rose-950/60 hover:text-rose-300 transition flex items-center gap-1" title="锁定并退出当前登录">
+        <i class="fa-solid fa-arrow-right-from-bracket"></i> 退出
+      </button>
       <a href="/" class="text-xs text-slate-400 hover:text-white flex items-center gap-1 ml-1">
         <i class="fa-solid fa-arrow-left"></i> 前台
       </a>
@@ -2535,7 +2577,7 @@ function getAdminHTML(env) {
     <!-- 管理秘钥与自动刷新控制 -->
     <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row gap-2 justify-between items-center">
       <div class="flex gap-2 w-full sm:w-auto flex-1">
-        <input type="password" id="admin-key" placeholder="输入管理员密钥" value="51245124" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+        <input type="password" id="admin-key" placeholder="输入管理员密钥" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
         <button onclick="loadAdminData()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-medium">刷新</button>
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-400">
@@ -2859,14 +2901,88 @@ function getAdminHTML(env) {
   </div>
 
   <script>
-    var urlParams = new URLSearchParams(window.location.search);
-    var urlKey = urlParams.get("key");
-    var savedKey = localStorage.getItem("faka_admin_key");
-    var activeKey = urlKey || savedKey || "51245124";
-    var adminKeyInput = document.getElementById("admin-key");
-    if (adminKeyInput) {
-      adminKeyInput.value = activeKey;
-      localStorage.setItem("faka_admin_key", activeKey);
+    var adminPollTimer = null;
+
+    function togglePasswordVisibility() {
+      var inp = document.getElementById("gate-password-input");
+      var icon = document.getElementById("eye-icon");
+      if (!inp) return;
+      if (inp.type === "password") {
+        inp.type = "text";
+        if (icon) icon.className = "fa-solid fa-eye-slash";
+      } else {
+        inp.type = "password";
+        if (icon) icon.className = "fa-solid fa-eye";
+      }
+    }
+
+    async function submitAdminLogin() {
+      var passInput = document.getElementById("gate-password-input");
+      var key = (passInput ? passInput.value.trim() : "");
+      var errMsg = document.getElementById("gate-error-msg");
+      var btn = document.getElementById("btn-gate-login");
+      var remember = document.getElementById("gate-remember-check").checked;
+
+      if (!key) {
+        if (errMsg) {
+          errMsg.innerText = "请输入管理密码";
+          errMsg.classList.remove("hidden");
+        }
+        return;
+      }
+
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 正在安全验证...';
+      }
+
+      try {
+        var res = await fetch("/api/admin/orders?key=" + encodeURIComponent(key));
+        var json = await res.json();
+        if (json.code === 0) {
+          if (remember) {
+            localStorage.setItem("faka_admin_key", key);
+          } else {
+            sessionStorage.setItem("faka_admin_key", key);
+            localStorage.removeItem("faka_admin_key");
+          }
+          var keyInput = document.getElementById("admin-key");
+          if (keyInput) keyInput.value = key;
+          document.getElementById("admin-login-modal").classList.add("hidden");
+          if (errMsg) errMsg.classList.add("hidden");
+          loadAdminData();
+          startAdminPolling();
+        } else {
+          if (errMsg) {
+            errMsg.innerText = "⚠️ 密码错误，访问被拒绝！请核对大小写";
+            errMsg.classList.remove("hidden");
+          }
+        }
+      } catch (err) {
+        if (errMsg) {
+          errMsg.innerText = "网络连接异常，请重试";
+          errMsg.classList.remove("hidden");
+        }
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 立即验证进入后台';
+        }
+      }
+    }
+
+    function adminLogout() {
+      if (!confirm("确定要退出管理后台并锁定？")) return;
+      localStorage.removeItem("faka_admin_key");
+      sessionStorage.removeItem("faka_admin_key");
+      if (adminPollTimer) clearInterval(adminPollTimer);
+      var keyInput = document.getElementById("admin-key");
+      if (keyInput) keyInput.value = "";
+      var gateInput = document.getElementById("gate-password-input");
+      if (gateInput) gateInput.value = "";
+      var errMsg = document.getElementById("gate-error-msg");
+      if (errMsg) errMsg.classList.add("hidden");
+      document.getElementById("admin-login-modal").classList.remove("hidden");
     }
 
     var soundEnabled = localStorage.getItem("faka_sound_enabled") !== "false";
@@ -2988,9 +3104,12 @@ function getAdminHTML(env) {
 
     async function loadAdminData() {
       var keyInput = document.getElementById("admin-key");
-      var key = (keyInput ? keyInput.value.trim() : "") || "51245124";
+      var key = (keyInput ? keyInput.value.trim() : "") || localStorage.getItem("faka_admin_key") || sessionStorage.getItem("faka_admin_key");
+      if (!key) {
+        document.getElementById("admin-login-modal").classList.remove("hidden");
+        return;
+      }
       if (keyInput) keyInput.value = key;
-      localStorage.setItem("faka_admin_key", key);
 
       var panelPaid = document.getElementById("order-panel-paid");
       var panelUnpaid = document.getElementById("order-panel-unpaid");
@@ -3187,7 +3306,13 @@ function getAdminHTML(env) {
             renderCategoryPriceTable(json.categories, json.category_prices, json.category_images);
           }
         } else {
-          if (panelPaid) panelPaid.innerHTML = '<div class="p-3 bg-rose-950/60 border border-rose-800 rounded-lg text-rose-300 text-xs text-center">⚠️ 访问受限: ' + (json.msg || "密钥错误") + '，请在上方输入正确密钥（默认: 51245124）</div>';
+          if (adminPollTimer) clearInterval(adminPollTimer);
+          document.getElementById("admin-login-modal").classList.remove("hidden");
+          var errMsg = document.getElementById("gate-error-msg");
+          if (errMsg) {
+            errMsg.innerText = "⚠️ 访问拒绝: " + (json.msg || "管理密钥错误");
+            errMsg.classList.remove("hidden");
+          }
         }
       } catch (e) {
         if (pollTxt) pollTxt.innerText = "网络异常重试中...";
@@ -3925,16 +4050,49 @@ function getAdminHTML(env) {
       }
     }
 
-    loadAdminData();
-    var adminPollTimer = setInterval(loadAdminData, 4000);
+    function startAdminPolling() {
+      if (adminPollTimer) clearInterval(adminPollTimer);
+      adminPollTimer = setInterval(loadAdminData, 4000);
+    }
+
+    async function initAdminPage() {
+      var urlParams = new URLSearchParams(window.location.search);
+      var urlKey = urlParams.get("key");
+      var savedKey = localStorage.getItem("faka_admin_key") || sessionStorage.getItem("faka_admin_key");
+      var targetKey = urlKey || savedKey;
+
+      if (targetKey) {
+        var keyInput = document.getElementById("admin-key");
+        if (keyInput) keyInput.value = targetKey;
+        try {
+          var res = await fetch("/api/admin/orders?key=" + encodeURIComponent(targetKey));
+          var json = await res.json();
+          if (json.code === 0) {
+            localStorage.setItem("faka_admin_key", targetKey);
+            document.getElementById("admin-login-modal").classList.add("hidden");
+            loadAdminData();
+            startAdminPolling();
+            return;
+          }
+        } catch(e) {}
+      }
+
+      // 未登录或密码不正确，展示安全锁屏门禁
+      document.getElementById("admin-login-modal").classList.remove("hidden");
+    }
+
+    initAdminPage();
 
     // 智能节流：离开页面/锁屏时自动停止请求，切回页面时立即刷新并恢复
     document.addEventListener("visibilitychange", function() {
       if (document.hidden) {
         if (adminPollTimer) clearInterval(adminPollTimer);
       } else {
-        loadAdminData();
-        adminPollTimer = setInterval(loadAdminData, 4000);
+        var key = document.getElementById("admin-key").value.trim();
+        if (key) {
+          loadAdminData();
+          startAdminPolling();
+        }
       }
     });
   </script>
