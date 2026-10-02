@@ -59,11 +59,15 @@ export default {
         let categoryPrices = {};
         let categoryImages = {};
         let siteAnnouncement = "";
+        let payNote = "";
         let contactInfo = { wechat: "", wechat_qr: "", telegram: "", qq: "", custom_tip: "" };
 
         try {
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrRow && qrRow.value) qrcode = qrRow.value;
+
+          const noteRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_NOTE'").first();
+          if (noteRow && noteRow.value) payNote = noteRow.value;
 
           const priceRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
           if (priceRow && priceRow.value) currentPrice = priceRow.value;
@@ -106,6 +110,7 @@ export default {
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
           category_images: categoryImages,
+          pay_note: payNote,
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
       }
@@ -456,6 +461,7 @@ export default {
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
         let currentAnnouncement = "";
+        let currentPayNote = "";
         let pushplusToken = "";
         let categoryPrices = {};
         let categoryImages = {};
@@ -464,6 +470,9 @@ export default {
         try {
           const qrSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrSetting) currentQrcode = qrSetting.value;
+
+          const noteSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_NOTE'").first();
+          if (noteSetting) currentPayNote = noteSetting.value;
 
           const priceSetting = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PRICE'").first();
           if (priceSetting) currentPrice = priceSetting.value;
@@ -513,6 +522,7 @@ export default {
           pending: pendingOrders.results || [],
           recent: recentPaid.results || [],
           qrcode: currentQrcode,
+          pay_note: currentPayNote,
           price: parseFloat(currentPrice).toFixed(2),
           site_name: currentSiteName,
           announcement: currentAnnouncement,
@@ -910,7 +920,7 @@ export default {
         }, corsHeaders);
       }
 
-      // 路由 7: 管理员后台 - 上传收款码
+      // 路由 7: 管理员后台 - 保存微信收款码与支付设置
       if (path === "/api/admin/upload_qrcode" && request.method === "POST") {
         const body = await request.json();
         const key = body.key || "";
@@ -918,20 +928,26 @@ export default {
           return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
         }
 
-        const imageData = body.image_data;
-        if (!imageData || !imageData.startsWith("data:image/")) {
-          return jsonResponse({ code: -1, msg: "无效的图片格式" }, corsHeaders);
+        const imageData = body.image_data || body.image_url;
+        if (imageData) {
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('PAY_QRCODE', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(imageData).run();
         }
 
-        await env.DB.prepare(`
-          INSERT INTO settings (key, value, updated_at)
-          VALUES ('PAY_QRCODE', ?, datetime('now', '+8 hours'))
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
-        `).bind(imageData).run();
+        if (body.pay_note !== undefined) {
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('PAY_NOTE', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(body.pay_note).run();
+        }
 
         return jsonResponse({
           code: 0,
-          msg: "🎉 收款码已成功上传并保存在 Cloudflare 中！"
+          msg: "🎉 微信收款设置已成功保存！"
         }, corsHeaders);
       }
 
@@ -2002,75 +2018,57 @@ function getFrontendHTML(env) {
           </div>
         </div>
 
-        <!-- 💳 付款方式按钮组 (完全还原截图) -->
+        <!-- 💳 付款方式 (仅保留微信支付) -->
         <div class="space-y-2 pt-2 border-t border-slate-800">
-          <div class="text-xs font-bold text-slate-300 flex items-center gap-1.5 mb-1.5">
-            <i class="fa-solid fa-credit-card text-indigo-400"></i> 💳 付款 (点击付款方式结算)：
+          <div class="text-xs font-bold text-slate-300 flex items-center justify-between mb-1">
+            <span class="flex items-center gap-1.5"><i class="fa-brands fa-weixin text-emerald-400 text-base"></i> 付款方式 (微信安全结算)：</span>
+            <span class="text-[11px] text-emerald-400 font-medium flex items-center gap-1"><i class="fa-solid fa-bolt"></i> 扫码秒级自动发卡</span>
           </div>
-          <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
-            <button type="button" onclick="handlePayClick('Alipay')" class="p-2 rounded-xl bg-[#1677ff] hover:bg-[#4096ff] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-brands fa-alipay text-sm"></i>
-              <span>Alipay</span>
-            </button>
-            <button type="button" onclick="handlePayClick('USDT')" class="p-2 rounded-xl bg-[#26a17b] hover:bg-[#208b6a] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-solid fa-t text-xs"></i>
-              <span>USDT</span>
-            </button>
-            <button type="button" onclick="handlePayClick('TRX')" class="p-2 rounded-xl bg-[#eb0029] hover:bg-[#ff3355] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-solid fa-gem text-xs"></i>
-              <span>TRX</span>
-            </button>
-            <button type="button" onclick="handlePayClick('BEP20')" class="p-2 rounded-xl bg-slate-950 border border-[#f0b90b]/60 hover:bg-slate-900 text-[#f0b90b] font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-solid fa-cube text-xs"></i>
-              <span>BEP20</span>
-            </button>
-            <button type="button" onclick="handlePayClick('ERC20')" class="p-2 rounded-xl bg-[#627eea] hover:bg-[#7b92ff] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-brands fa-ethereum text-sm"></i>
-              <span>ERC20</span>
-            </button>
-            <button type="button" onclick="handlePayClick('微信支付')" class="p-2 rounded-xl bg-[#07c160] hover:bg-[#06ae56] text-white font-bold text-[11px] flex flex-col sm:flex-row items-center justify-center gap-1 shadow transition active:scale-95">
-              <i class="fa-brands fa-weixin text-sm"></i>
-              <span>WX4.5%</span>
-            </button>
-          </div>
+          <button type="button" onclick="handlePayClick('微信支付')" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/60 transition transform active:scale-95 cursor-pointer">
+            <i class="fa-brands fa-weixin text-xl"></i>
+            <span>微信支付 · 立即扫码结算出卡</span>
+          </button>
         </div>
       </div>
     </div>
 
     <!-- 弹窗 1：扫码付款与极速发货等待弹窗 -->
     <div id="modal-pay" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 p-4" style="display: none; align-items: center; justify-content: center;">
-      <div class="glass max-w-sm w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40 text-center">
+      <div class="glass max-w-sm w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-emerald-500/40 text-center">
         <h3 class="text-base font-bold text-white flex items-center justify-center gap-1.5">
-          <i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> <span id="pay-modal-title">付款与出卡</span>
+          <i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> <span id="pay-modal-title">微信扫码付款与出卡</span>
         </h3>
 
         <!-- 应付金额 -->
-        <div class="bg-indigo-950/60 border border-indigo-500/30 rounded-xl p-2.5 text-center">
+        <div class="bg-emerald-950/40 border border-emerald-500/30 rounded-xl p-2.5 text-center">
           <div class="text-xs text-slate-400">应付金额：</div>
           <div class="text-2xl font-extrabold text-emerald-400 font-mono my-0.5" id="pay-money">￥4.99</div>
-          <div class="text-[11px] text-slate-400">订单号: <span id="pay-order-no-disp" class="font-mono text-indigo-300"></span></div>
+          <div class="text-[11px] text-slate-400">订单号: <span id="pay-order-no-disp" class="font-mono text-emerald-300"></span></div>
         </div>
 
         <!-- 收款二维码 -->
         <div class="p-2 bg-white rounded-xl inline-block shadow-inner mx-auto max-w-[190px] max-h-[190px]">
-          <img id="pay-qr-img" src="" alt="收款码" class="w-40 h-40 rounded-lg object-contain mx-auto">
+          <img id="pay-qr-img" src="" alt="微信收款码" class="w-40 h-40 rounded-lg object-contain mx-auto">
+        </div>
+
+        <div id="pay-guide-tip" class="text-xs text-amber-300/90 bg-amber-950/40 border border-amber-500/30 rounded-lg p-2 text-left hidden">
         </div>
 
         <!-- 提交付款状态区 -->
         <div id="pay-action-section" class="space-y-3">
           <div class="space-y-1.5">
-            <input type="text" id="pay-note-input" placeholder="输入付款微信昵称或单号尾号 (选填)" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-center">
+            <input type="text" id="pay-note-input" placeholder="输入付款微信昵称或单号尾号 (选填)" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 text-center">
             <button onclick="confirmPaidAndNotify()" id="btn-notify-paid" class="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-lg transition">
-              <i class="fa-solid fa-paper-plane"></i> 我已完成支付，通知站长发货
+              <i class="fa-solid fa-paper-plane"></i> 我已完成微信支付，通知站长发货
             </button>
           </div>
           <div class="text-[11px] text-slate-400 leading-tight">
-            * 付款后点击上方按钮，系统核实后将自动在此页面秒级弹出卡密！
+            * 微信扫码付款后点击上方按钮，系统核实后将自动在此页面秒级弹出卡密！
           </div>
         </div>
 
         <!-- 等待站长确认状态条 (默认隐藏，点击后显示) -->
-        <div id="pay-waiting-section" class="hidden space-y-2 bg-indigo-950/80 p-3 rounded-xl border border-indigo-500/40">
+        <div id="pay-waiting-section" class="hidden space-y-2 bg-emerald-950/80 p-3 rounded-xl border border-emerald-500/40">
           <div class="flex items-center justify-center gap-2 text-xs text-emerald-400 font-bold animate-pulse">
             <i class="fa-solid fa-spinner fa-spin text-base"></i>
             <span>已通知站长，正在为您出库账号...</span>
@@ -2789,6 +2787,15 @@ function getFrontendHTML(env) {
           if (json.pay_qrcode) {
             var qrImg = document.getElementById("pay-qr-img");
             if (qrImg) qrImg.src = json.pay_qrcode;
+          }
+          var guideTip = document.getElementById("pay-guide-tip");
+          if (guideTip) {
+            if (json.pay_note) {
+              guideTip.innerHTML = '<i class="fa-solid fa-circle-info mr-1"></i>' + json.pay_note;
+              guideTip.classList.remove("hidden");
+            } else {
+              guideTip.classList.add("hidden");
+            }
           }
           if (json.site_name) {
             document.title = json.site_name + " - 自动发卡网";
@@ -3564,20 +3571,46 @@ function getAdminHTML(env) {
         </div>
       </div>
 
-      <!-- 4. 设置微信收款码 -->
-      <div class="space-y-2 pt-2 border-t border-slate-800/80">
-        <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
-          <i class="fa-solid fa-qrcode text-emerald-400"></i> 微信收款二维码图片
-        </label>
-        <div class="flex gap-3 items-center">
-          <div class="w-16 h-16 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
-            <img id="current-qrcode-preview" src="" alt="收款码" class="w-full h-full object-contain hidden">
-            <span id="no-qrcode-text" class="text-[10px] text-slate-500">未设置</span>
+      <!-- 4. 微信收款设置 (前台唯一支付方式) -->
+      <div class="space-y-3 pt-2 border-t border-slate-800/80">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-bold text-slate-200 flex items-center gap-1.5">
+            <i class="fa-brands fa-weixin text-emerald-400 text-sm"></i> 微信收款设置 (前台唯一支付结算方式)
+          </label>
+          <span class="text-[11px] text-emerald-400 font-medium"><i class="fa-solid fa-circle-check mr-1"></i>已启用微信扫码支付</span>
+        </div>
+
+        <!-- 微信收款码上传与预览 -->
+        <div class="space-y-2 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+          <label class="text-[11px] font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-qrcode text-emerald-400"></i> 微信收款二维码图片 (本地上传或填入外链图片URL)
+          </label>
+          <div class="flex gap-3 items-center">
+            <div class="w-16 h-16 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+              <img id="current-qrcode-preview" src="" alt="微信收款码" class="w-full h-full object-contain hidden">
+              <span id="no-qrcode-text" class="text-[10px] text-slate-500">未设置</span>
+            </div>
+            <div class="flex-1 space-y-2">
+              <input type="file" id="qrcode-file-input" accept="image/*" class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-600 file:text-white cursor-pointer w-full">
+              <div class="flex gap-1.5">
+                <input type="text" id="qrcode-url-input" placeholder="或直接输入微信收款码图片 URL 链接" class="flex-1 px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+                <button onclick="uploadQrcode()" id="btn-upload-qr" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1 shrink-0">
+                  <i class="fa-solid fa-cloud-arrow-up"></i> 保存收款码
+                </button>
+              </div>
+            </div>
           </div>
-          <div class="flex-1 space-y-1.5">
-            <input type="file" id="qrcode-file-input" accept="image/*" class="text-xs text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-indigo-600 file:text-white cursor-pointer">
-            <button onclick="uploadQrcode()" id="btn-upload-qr" class="w-full px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1">
-              <i class="fa-solid fa-cloud-arrow-up"></i> 保存收款码
+        </div>
+
+        <!-- 微信付款引导说明 -->
+        <div class="space-y-1.5 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+          <label class="text-[11px] font-medium text-slate-300 flex items-center gap-1">
+            <i class="fa-solid fa-comment-dots text-amber-400"></i> 微信付款引导提示 (在买家扫码弹窗中展示)
+          </label>
+          <div class="flex gap-2">
+            <input type="text" id="pay-note-setting-input" placeholder="例如：请使用微信扫一扫付款，付款后点击通知发货即可秒出卡" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+            <button onclick="savePayNote()" class="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
+              <i class="fa-solid fa-floppy-disk"></i> 保存提示
             </button>
           </div>
         </div>
@@ -3997,6 +4030,15 @@ function getAdminHTML(env) {
             document.getElementById("current-qrcode-preview").src = json.qrcode;
             document.getElementById("current-qrcode-preview").classList.remove("hidden");
             document.getElementById("no-qrcode-text").classList.add("hidden");
+            var qrUrlInp = document.getElementById("qrcode-url-input");
+            if (qrUrlInp && !qrUrlInp.value && json.qrcode.startsWith("http")) {
+              qrUrlInp.value = json.qrcode;
+            }
+          }
+
+          if (json.pay_note !== undefined) {
+            var noteInp = document.getElementById("pay-note-setting-input");
+            if (noteInp && !noteInp.value) noteInp.value = json.pay_note || "";
           }
 
           if (json.contact_info) {
@@ -4651,10 +4693,52 @@ function getAdminHTML(env) {
       }
     }
 
+    async function savePayNote() {
+      var key = document.getElementById("admin-key").value.trim();
+      var note = document.getElementById("pay-note-setting-input").value.trim();
+      try {
+        var res = await fetch("/api/admin/upload_qrcode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, pay_note: note })
+        });
+        var json = await res.json();
+        alert(json.msg || "保存成功");
+        loadAdminData();
+      } catch(e) {
+        alert("保存失败");
+      }
+    }
+
     async function uploadQrcode() {
       var fileInput = document.getElementById("qrcode-file-input");
+      var urlInput = document.getElementById("qrcode-url-input");
       var key = document.getElementById("admin-key").value.trim();
-      if (!fileInput.files || fileInput.files.length === 0) return alert("请先选择一张图片");
+      var urlVal = (urlInput ? urlInput.value : "").trim();
+
+      if (urlVal && (!fileInput.files || fileInput.files.length === 0)) {
+        var btn = document.getElementById("btn-upload-qr");
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 保存中...';
+        try {
+          var res = await fetch("/api/admin/upload_qrcode", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ key: key, image_url: urlVal })
+          });
+          var json = await res.json();
+          alert(json.msg || "保存成功");
+          loadAdminData();
+        } catch(e) {
+          alert("保存失败");
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> 保存收款码';
+        }
+        return;
+      }
+
+      if (!fileInput.files || fileInput.files.length === 0) return alert("请先选择一张图片或填入收款码图片链接");
 
       var file = fileInput.files[0];
       var btn = document.getElementById("btn-upload-qr");
