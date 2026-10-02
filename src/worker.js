@@ -942,12 +942,27 @@ export default {
         const toEmail = (body.test_email || "").trim();
         if (!toEmail) return jsonResponse({ code: -1, msg: "请输入接收测试邮件的邮箱" }, corsHeaders);
 
+        let customConfig = null;
+        if (body.resend_key) {
+          customConfig = {
+            provider: "resend",
+            resend_key: body.resend_key.trim(),
+            from_email: (body.from_email || "onboarding@resend.dev").trim()
+          };
+          // 自动保存到数据库
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('EMAIL_CONFIG', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(JSON.stringify(customConfig)).run();
+        }
+
         const mockOrder = { order_no: "FK_TEST_" + Date.now().toString().slice(-4), region: "美国", price: "4.99" };
         const mockCarmi = "apple_demo@icloud.com----Pass123456";
-        const emailResult = await sendCarmiEmail(env, mockOrder, mockCarmi, toEmail, url.origin);
+        const emailResult = await sendCarmiEmail(env, mockOrder, mockCarmi, toEmail, url.origin, customConfig);
 
         if (emailResult.success) {
-          return jsonResponse({ code: 0, msg: `🎉 测试邮件已成功发出！请检查 ${toEmail} 的收件箱或垃圾箱。` }, corsHeaders);
+          return jsonResponse({ code: 0, msg: `🎉 测试邮件已成功发出！配置已自动保存生效，请检查 ${toEmail} 的收件箱或垃圾箱。` }, corsHeaders);
         } else {
           return jsonResponse({ code: -1, msg: `❌ 发送失败: ${emailResult.error}` }, corsHeaders);
         }
@@ -1218,7 +1233,7 @@ function parseCarmiServer(raw) {
 /**
  * 发送卡密到买家邮箱 (Resend API / Brevo / Webhook 智能多通道)
  */
-async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
+async function sendCarmiEmail(env, order, carmiText, toEmail, origin, customConfig) {
   if (!toEmail) return { success: false, error: "接收邮箱地址为空" };
   let siteName = env.SITE_NAME || "小火箭账号";
   try {
@@ -1226,13 +1241,15 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
     if (siteRow && siteRow.value) siteName = siteRow.value;
   } catch(e) {}
 
-  let emailConfig = { provider: "resend", resend_key: "", from_email: "onboarding@resend.dev", from_name: siteName };
-  try {
-    const cfgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'EMAIL_CONFIG'").first();
-    if (cfgRow && cfgRow.value) {
-      emailConfig = Object.assign(emailConfig, JSON.parse(cfgRow.value));
-    }
-  } catch(e) {}
+  let emailConfig = customConfig || { provider: "resend", resend_key: "", from_email: "onboarding@resend.dev", from_name: siteName };
+  if (!customConfig) {
+    try {
+      const cfgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'EMAIL_CONFIG'").first();
+      if (cfgRow && cfgRow.value) {
+        emailConfig = Object.assign(emailConfig, JSON.parse(cfgRow.value));
+      }
+    } catch(e) {}
+  }
 
   const parsed = parseCarmiServer(carmiText);
   const account = parsed.account || carmiText;
@@ -4878,7 +4895,11 @@ function getAdminHTML(env) {
     async function sendTestEmail() {
       var key = document.getElementById("admin-key").value.trim();
       var toEmail = document.getElementById("test-email-input").value.trim();
+      var resendKey = document.getElementById("email-resend-key").value.trim();
+      var fromAddr = document.getElementById("email-from-addr").value.trim();
+
       if (!toEmail) return alert("请输入接收测试邮件的邮箱（例如您的QQ/163邮箱）");
+      if (!resendKey) return alert("请先在上方输入框填入 Resend API Key (以 re_ 开头)");
 
       var btn = document.getElementById("btn-test-email");
       btn.disabled = true;
@@ -4888,10 +4909,18 @@ function getAdminHTML(env) {
         var res = await fetch("/api/admin/test_email", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ key: key, test_email: toEmail })
+          body: JSON.stringify({
+            key: key,
+            test_email: toEmail,
+            resend_key: resendKey,
+            from_email: fromAddr
+          })
         });
         var json = await res.json();
         alert(json.msg || (json.code === 0 ? "发送成功" : "发送失败"));
+        if (json.code === 0) {
+          loadAdminData();
+        }
       } catch(e) {
         alert("请求异常，发送失败");
       } finally {
