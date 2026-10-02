@@ -2528,7 +2528,7 @@ function getAdminHTML(env) {
         <div>
           <label class="text-[11px] text-slate-400 block mb-1">管理访问密钥</label>
           <div class="relative">
-            <input type="password" id="gate-password-input" placeholder="输入管理密码 (首次默认 51245124)" onkeydown="if(event.key==='Enter')submitAdminLogin()" class="w-full pl-4 pr-10 py-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
+            <input type="password" id="gate-password-input" placeholder="请输入管理员访问密钥" onkeydown="if(event.key==='Enter')submitAdminLogin()" class="w-full pl-4 pr-10 py-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono">
             <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-3.5 text-slate-400 hover:text-white text-sm">
               <i class="fa-solid fa-eye" id="eye-icon"></i>
             </button>
@@ -2760,7 +2760,7 @@ function getAdminHTML(env) {
           <i class="fa-solid fa-key text-rose-400"></i> 修改后台管理密钥 (登录密码)
         </label>
         <div class="flex gap-2">
-          <input type="text" id="new-admin-key-input" placeholder="输入新的管理密码 (默认: 51245124)" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
+          <input type="text" id="new-admin-key-input" placeholder="输入新的管理密码 (至少4位)" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
           <button onclick="saveAdminKey()" class="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg text-xs flex items-center gap-1 shrink-0">
             <i class="fa-solid fa-shield-halved"></i> 修改密码
           </button>
