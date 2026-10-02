@@ -1879,7 +1879,7 @@ function getFrontendHTML(env) {
     </div>
 
     <!-- 弹窗 0：独立商品购买与结算详情弹窗 (根据发卡台标准UI 100%还原) -->
-    <div id="modal-checkout" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden flex items-center justify-center p-3 sm:p-4 z-50 overflow-y-auto">
+    <div id="modal-checkout" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden z-50 overflow-y-auto p-3 sm:p-4" style="display: none; align-items: center; justify-content: center;">
       <div class="glass max-w-lg w-full rounded-2xl p-5 sm:p-7 shadow-2xl space-y-4 border border-indigo-500/40 my-auto text-slate-200 relative animate-in fade-in zoom-in-95 duration-200">
         <!-- 关闭按钮 -->
         <button onclick="closeCheckoutModal()" class="absolute right-4 top-4 text-slate-400 hover:text-white text-lg w-8 h-8 rounded-full bg-slate-800/70 hover:bg-slate-700 flex items-center justify-center transition z-10">
@@ -2038,7 +2038,7 @@ function getFrontendHTML(env) {
     </div>
 
     <!-- 弹窗 1：扫码付款与极速发货等待弹窗 -->
-    <div id="modal-pay" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
+    <div id="modal-pay" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 p-4" style="display: none; align-items: center; justify-content: center;">
       <div class="glass max-w-sm w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40 text-center">
         <h3 class="text-base font-bold text-white flex items-center justify-center gap-1.5">
           <i class="fa-brands fa-weixin text-emerald-400 text-lg"></i> <span id="pay-modal-title">付款与出卡</span>
@@ -2087,7 +2087,7 @@ function getFrontendHTML(env) {
     </div>
 
     <!-- 弹窗 2：发卡成功结果 (账号密码分别独立显示与单独一键复制) -->
-    <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50 overflow-y-auto">
+    <div id="modal-result" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 p-4 overflow-y-auto" style="display: none; align-items: center; justify-content: center;">
       <div class="glass max-w-lg w-full rounded-2xl p-6 sm:p-8 shadow-2xl space-y-4 border border-emerald-500/40 my-auto">
         <div class="text-center">
           <div class="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-2 border border-emerald-500/30">
@@ -2185,7 +2185,7 @@ function getFrontendHTML(env) {
     </div>
 
     <!-- 弹窗 3：在线客服与常见售后解答 -->
-    <div id="modal-support" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden flex items-center justify-center p-4 z-50">
+    <div id="modal-support" class="fixed inset-0 bg-black/80 backdrop-blur-md hidden z-50 p-4" style="display: none; align-items: center; justify-content: center;">
       <div class="glass max-w-md w-full rounded-2xl p-6 shadow-2xl space-y-4 border border-indigo-500/40">
         <div class="flex justify-between items-center border-b border-slate-700 pb-3">
           <h3 class="text-base font-bold text-white flex items-center gap-2">
@@ -2485,19 +2485,26 @@ function getFrontendHTML(env) {
 
     function openSupportModal() {
       var modal = document.getElementById("modal-support");
-      if (modal) modal.classList.remove("hidden");
+      if (modal) {
+        modal.classList.remove("hidden");
+        modal.style.display = "flex";
+      }
     }
 
     function closeSupportModal() {
       var modal = document.getElementById("modal-support");
-      if (modal) modal.classList.add("hidden");
+      if (modal) {
+        modal.classList.add("hidden");
+        modal.style.display = "none";
+      }
     }
 
     function openCheckoutModal(region) {
       currentSelectedRegion = region || currentSelectedRegion || "美国";
-      var regData = loadedRegions.find(function(r) { return r.region === currentSelectedRegion; });
-      var stock = regData ? regData.stock : 999;
-      var price = parseFloat(globalCategoryPrices[currentSelectedRegion] || globalDefaultPrice);
+      var regData = (loadedRegions || []).find(function(r) { return r && r.region === currentSelectedRegion; });
+      var stock = (regData && typeof regData.stock === 'number') ? regData.stock : 999;
+      var price = parseFloat((globalCategoryPrices && globalCategoryPrices[currentSelectedRegion]) || globalDefaultPrice || "4.99");
+      if (isNaN(price)) price = 4.99;
 
       var titleEl = document.getElementById("co-product-title");
       if (titleEl) titleEl.innerText = "租号下载小火箭 (" + currentSelectedRegion + ")";
@@ -2524,12 +2531,18 @@ function getFrontendHTML(env) {
       clearEmailErr();
 
       var modal = document.getElementById("modal-checkout");
-      if (modal) modal.classList.remove("hidden");
+      if (modal) {
+        modal.classList.remove("hidden");
+        modal.style.display = "flex";
+      }
     }
 
     function closeCheckoutModal() {
       var modal = document.getElementById("modal-checkout");
-      if (modal) modal.classList.add("hidden");
+      if (modal) {
+        modal.classList.add("hidden");
+        modal.style.display = "none";
+      }
     }
 
     function shareCurrentProduct() {
@@ -2691,7 +2704,11 @@ function getFrontendHTML(env) {
           document.getElementById("pay-note-input").value = "";
           document.getElementById("pay-action-section").classList.remove("hidden");
           document.getElementById("pay-waiting-section").classList.add("hidden");
-          document.getElementById("modal-pay").classList.remove("hidden");
+          var modalPay = document.getElementById("modal-pay");
+          if (modalPay) {
+            modalPay.classList.remove("hidden");
+            modalPay.style.display = "flex";
+          }
 
           startPayPolling(currentOrderNo);
         } else {
@@ -2922,7 +2939,10 @@ function getFrontendHTML(env) {
           if (json.code === 0 && json.status === 1 && json.carmi) {
             clearInterval(payPollingTimer);
             var modalPay = document.getElementById("modal-pay");
-            if (modalPay) modalPay.classList.add("hidden");
+            if (modalPay) {
+              modalPay.classList.add("hidden");
+              modalPay.style.display = "none";
+            }
             var resOrderNo = document.getElementById("res-order-no");
             if (resOrderNo) resOrderNo.innerText = orderNo;
 
@@ -2933,7 +2953,10 @@ function getFrontendHTML(env) {
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, orderNo);
             var modalRes = document.getElementById("modal-result");
-            if (modalRes) modalRes.classList.remove("hidden");
+            if (modalRes) {
+              modalRes.classList.remove("hidden");
+              modalRes.style.display = "flex";
+            }
             showToast("🎉 站长已确认出卡！");
             loadStats();
 
@@ -2961,14 +2984,20 @@ function getFrontendHTML(env) {
             renderCarmiResult(json.carmi);
             updateWarrantyUI(json.warranty, currentOrderNo);
             var modalRes = document.getElementById("modal-result");
-            if (modalRes) modalRes.classList.remove("hidden");
+            if (modalRes) {
+              modalRes.classList.remove("hidden");
+              modalRes.style.display = "flex";
+            }
           } else {
             var payMoney = document.getElementById("pay-money");
             if (payMoney) payMoney.innerText = "￥" + json.price;
             var payDisp = document.getElementById("pay-order-no-disp");
             if (payDisp) payDisp.innerText = currentOrderNo;
             var modalPay = document.getElementById("modal-pay");
-            if (modalPay) modalPay.classList.remove("hidden");
+            if (modalPay) {
+              modalPay.classList.remove("hidden");
+              modalPay.style.display = "flex";
+            }
             startPayPolling(currentOrderNo);
           }
         } else {
@@ -3150,7 +3179,11 @@ function getFrontendHTML(env) {
 
     function cancelPay() {
       if (payPollingTimer) clearInterval(payPollingTimer);
-      document.getElementById("modal-pay").classList.add("hidden");
+      var modalPay = document.getElementById("modal-pay");
+      if (modalPay) {
+        modalPay.classList.add("hidden");
+        modalPay.style.display = "none";
+      }
     }
 
     async function queryOrders() {
@@ -3229,7 +3262,11 @@ function getFrontendHTML(env) {
     }
 
     function closeModal() {
-      document.getElementById("modal-result").classList.add("hidden");
+      var modalRes = document.getElementById("modal-result");
+      if (modalRes) {
+        modalRes.classList.add("hidden");
+        modalRes.style.display = "none";
+      }
     }
 
     function startFlashSaleTimer() {
