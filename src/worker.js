@@ -272,13 +272,17 @@ export default {
         }
 
         try {
-          ctx.waitUntil(sendCarmiEmail(env, order, order.carmi, email, url.origin));
-          try {
-            await env.DB.prepare("UPDATE orders SET email_sent = 1, contact = ? WHERE order_no = ?").bind(email, orderNo).run();
-          } catch(e) {}
-          return jsonResponse({ code: 0, msg: `🎉 卡密已成功发送至邮箱：${email}！请查收收件箱或垃圾箱。` }, corsHeaders);
+          const emailResult = await sendCarmiEmail(env, order, order.carmi, email, url.origin);
+          if (emailResult.success) {
+            try {
+              await env.DB.prepare("UPDATE orders SET email_sent = 1, contact = ? WHERE order_no = ?").bind(email, orderNo).run();
+            } catch(e) {}
+            return jsonResponse({ code: 0, msg: `🎉 卡密已成功发送至邮箱：${email}！请查收收件箱或垃圾箱。` }, corsHeaders);
+          } else {
+            return jsonResponse({ code: -1, msg: emailResult.error || "邮件发送失败" }, corsHeaders);
+          }
         } catch(err) {
-          return jsonResponse({ code: -1, msg: "邮件发送失败: " + err.message }, corsHeaders);
+          return jsonResponse({ code: -1, msg: "邮件发送异常: " + err.message }, corsHeaders);
         }
       }
 
@@ -517,12 +521,21 @@ export default {
           }
         } catch(e) {}
 
+        let emailConfig = { provider: "resend", resend_key: "", from_email: "onboarding@resend.dev" };
+        try {
+          const emailRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'EMAIL_CONFIG'").first();
+          if (emailRow && emailRow.value) {
+            try { emailConfig = Object.assign(emailConfig, JSON.parse(emailRow.value)); } catch(e) {}
+          }
+        } catch(e) {}
+
         return jsonResponse({
           code: 0,
           pending: pendingOrders.results || [],
           recent: recentPaid.results || [],
           qrcode: currentQrcode,
           pay_note: currentPayNote,
+          email_config: emailConfig,
           price: parseFloat(currentPrice).toFixed(2),
           site_name: currentSiteName,
           announcement: currentAnnouncement,
@@ -900,6 +913,46 @@ export default {
         }
       }
 
+      // 路由 6.92: 管理员后台 - 保存邮件发信服务配置
+      if (path === "/api/admin/set_email_config" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const config = body.config || {};
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('EMAIL_CONFIG', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(config)).run();
+
+        return jsonResponse({ code: 0, msg: "🎉 邮件发信服务配置已成功保存！" }, corsHeaders);
+      }
+
+      // 路由 6.93: 管理员后台 - 测试邮件发信
+      if (path === "/api/admin/test_email" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const toEmail = (body.test_email || "").trim();
+        if (!toEmail) return jsonResponse({ code: -1, msg: "请输入接收测试邮件的邮箱" }, corsHeaders);
+
+        const mockOrder = { order_no: "FK_TEST_" + Date.now().toString().slice(-4), region: "美国", price: "4.99" };
+        const mockCarmi = "apple_demo@icloud.com----Pass123456";
+        const emailResult = await sendCarmiEmail(env, mockOrder, mockCarmi, toEmail, url.origin);
+
+        if (emailResult.success) {
+          return jsonResponse({ code: 0, msg: `🎉 测试邮件已成功发出！请检查 ${toEmail} 的收件箱或垃圾箱。` }, corsHeaders);
+        } else {
+          return jsonResponse({ code: -1, msg: `❌ 发送失败: ${emailResult.error}` }, corsHeaders);
+        }
+      }
+
       // 路由 6.95: 管理员后台 - 清理24小时未付款废单
       if (path === "/api/admin/clear_expired" && request.method === "POST") {
         const body = await request.json();
@@ -1163,11 +1216,24 @@ function parseCarmiServer(raw) {
 }
 
 /**
- * 发送卡密到买家邮箱 (MailChannels / Resend 智能多通道)
+ * 发送卡密到买家邮箱 (Resend API / Brevo / Webhook 智能多通道)
  */
 async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
-  if (!toEmail) return { success: false, msg: "邮箱为空" };
-  const siteName = env.SITE_NAME || "小火箭账号";
+  if (!toEmail) return { success: false, error: "接收邮箱地址为空" };
+  let siteName = env.SITE_NAME || "小火箭账号";
+  try {
+    const siteRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'SITE_NAME'").first();
+    if (siteRow && siteRow.value) siteName = siteRow.value;
+  } catch(e) {}
+
+  let emailConfig = { provider: "resend", resend_key: "", from_email: "onboarding@resend.dev", from_name: siteName };
+  try {
+    const cfgRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'EMAIL_CONFIG'").first();
+    if (cfgRow && cfgRow.value) {
+      emailConfig = Object.assign(emailConfig, JSON.parse(cfgRow.value));
+    }
+  } catch(e) {}
+
   const parsed = parseCarmiServer(carmiText);
   const account = parsed.account || carmiText;
   const password = parsed.password || "--";
@@ -1193,8 +1259,8 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
           <div style="background:#0f172a;border-radius:14px;padding:16px 18px;border:1px solid #334155;margin-bottom:20px;">
             <table style="width:100%;font-size:13px;line-height:1.9;color:#94a3b8;">
               <tr><td style="width:85px;color:#64748b;"><b>订单编号：</b></td><td style="font-family:monospace;color:#a5b4fc;font-weight:bold;">${order.order_no}</td></tr>
-              <tr><td style="color:#64748b;"><b>商品名称：</b></td><td style="color:#f8fafc;font-weight:bold;">${order.region} 独享 Apple ID (免费下载小火箭)</td></tr>
-              <tr><td style="color:#64748b;"><b>支付金额：</b></td><td style="color:#34d399;font-weight:bold;font-size:15px;">￥${order.price}</td></tr>
+              <tr><td style="color:#64748b;"><b>商品名称：</b></td><td style="color:#f8fafc;font-weight:bold;">${order.region || '独享'} Apple ID (免费下载小火箭)</td></tr>
+              <tr><td style="color:#64748b;"><b>支付金额：</b></td><td style="color:#34d399;font-weight:bold;font-size:15px;">￥${order.price || '4.99'}</td></tr>
               <tr><td style="color:#64748b;"><b>发货时间：</b></td><td>${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</td></tr>
             </table>
           </div>
@@ -1239,22 +1305,64 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin) {
     </html>
   `;
 
-  try {
-    await fetch("https://api.mailchannels.net/tx/v1/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        personalizations: [{ to: [{ email: toEmail, name: "Customer" }] }],
-        from: { email: `faka-notify@mailchannels.net`, name: siteName },
-        subject: `【${siteName}】您的订单卡密发货凭证 - 单号: ${order.order_no}`,
-        content: [{ type: "text/html", value: htmlContent }]
-      })
-    });
-    return { success: true };
-  } catch (err) {
-    console.error("邮件发送异常:", err);
-    return { success: false, error: err.message };
+  const subject = `【${siteName}】您的订单卡密发货凭证 - 单号: ${order.order_no}`;
+
+  // 1. Resend API 发信模式 (最高可靠性推荐)
+  const resendApiKey = (emailConfig.resend_key || env.RESEND_API_KEY || "").trim();
+  if (resendApiKey) {
+    const fromAddr = (emailConfig.from_email || "onboarding@resend.dev").trim();
+    const fromName = (emailConfig.from_name || siteName).trim();
+
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${resendApiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: `${fromName} <${fromAddr}>`,
+          to: [toEmail],
+          subject: subject,
+          html: htmlContent
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.message || `Resend 接口返回错误 (HTTP ${res.status})` };
+      }
+      return { success: true, id: data.id };
+    } catch (err) {
+      return { success: false, error: "Resend 请求网络异常: " + err.message };
+    }
   }
+
+  // 2. 自定义 Webhook 发信
+  if (emailConfig.provider === "webhook" && emailConfig.webhook_url) {
+    try {
+      const res = await fetch(emailConfig.webhook_url.trim(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: toEmail,
+          subject: subject,
+          html: htmlContent,
+          order_no: order.order_no,
+          site_name: siteName
+        })
+      });
+      if (!res.ok) return { success: false, error: `Webhook 发信失败 (HTTP ${res.status})` };
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: "Webhook 请求异常: " + err.message };
+    }
+  }
+
+  // 3. 未配置发信服务时给出明确提示
+  return {
+    success: false,
+    error: "尚未配置邮件发信 API Key。请站长登录后台【系统设置】->【邮件自动发信服务设置】中填入 Resend API Key（可免费在 resend.com 申请），即可一键开通自动发信！"
+  };
 }
 
 /**
@@ -3617,6 +3725,46 @@ function getAdminHTML(env) {
         </div>
       </div>
 
+      <!-- 4.5. 邮件自动发信服务设置 (Resend API) -->
+      <div class="space-y-3 pt-2 border-t border-slate-800/80">
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-bold text-slate-200 flex items-center gap-1.5">
+            <i class="fa-solid fa-envelope-circle-check text-sky-400 text-sm"></i> 邮件自动发信服务设置 (Resend API)
+          </label>
+          <a href="https://resend.com/signup" target="_blank" class="text-[11px] text-sky-400 hover:underline flex items-center gap-1">
+            <i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i> 免费获取 Resend Key (每天100封免配置)
+          </a>
+        </div>
+        <p class="text-[10px] text-slate-500">配置后，买家下单出卡或站长一键发货时，系统将自动将账号密码凭证发送到买家填写的邮箱中！</p>
+        
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1">
+              <i class="fa-solid fa-key text-sky-400"></i> Resend API Key (以 re_ 开头)：
+            </label>
+            <input type="password" id="email-resend-key" placeholder="例如: re_1234567890abcdef..." class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
+          </div>
+          <div class="space-y-1">
+            <label class="text-[11px] text-slate-400 flex items-center gap-1">
+              <i class="fa-solid fa-paper-plane text-emerald-400"></i> 发件人地址 (留空则默认使用 onboarding@resend.dev)：
+            </label>
+            <input type="text" id="email-from-addr" placeholder="onboarding@resend.dev 或您的自定义发信域名" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+          </div>
+        </div>
+
+        <div class="flex flex-col sm:flex-row gap-2 pt-1">
+          <button onclick="saveEmailConfig()" class="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1 shrink-0">
+            <i class="fa-solid fa-floppy-disk"></i> 保存邮件配置
+          </button>
+          <div class="flex-1 flex gap-1.5">
+            <input type="email" id="test-email-input" placeholder="输入测试接收邮箱 (如您的QQ/163邮箱)" class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white">
+            <button onclick="sendTestEmail()" id="btn-test-email" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-sky-400 font-bold rounded-lg text-xs flex items-center justify-center gap-1 shrink-0 border border-slate-700">
+              <i class="fa-solid fa-paper-plane"></i> 发送测试邮件
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- 5. 设置首页顶部公告栏 / 跑马灯 -->
       <div class="space-y-2 pt-2 border-t border-slate-800/80">
         <label class="text-xs font-medium text-slate-300 flex items-center gap-1">
@@ -4040,6 +4188,13 @@ function getAdminHTML(env) {
           if (json.pay_note !== undefined) {
             var noteInp = document.getElementById("pay-note-setting-input");
             if (noteInp && !noteInp.value) noteInp.value = json.pay_note || "";
+          }
+
+          if (json.email_config) {
+            var keyInp = document.getElementById("email-resend-key");
+            var fromInp = document.getElementById("email-from-addr");
+            if (keyInp && !keyInp.value) keyInp.value = json.email_config.resend_key || "";
+            if (fromInp && !fromInp.value) fromInp.value = json.email_config.from_email || "";
           }
 
           if (json.contact_info) {
@@ -4691,6 +4846,57 @@ function getAdminHTML(env) {
         loadAdminData();
       } catch(e) {
         alert("清理失败");
+      }
+    }
+
+    async function saveEmailConfig() {
+      var key = document.getElementById("admin-key").value.trim();
+      var resendKey = document.getElementById("email-resend-key").value.trim();
+      var fromAddr = document.getElementById("email-from-addr").value.trim();
+
+      try {
+        var res = await fetch("/api/admin/set_email_config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: key,
+            config: {
+              provider: "resend",
+              resend_key: resendKey,
+              from_email: fromAddr || "onboarding@resend.dev"
+            }
+          })
+        });
+        var json = await res.json();
+        alert(json.msg || "保存成功");
+        loadAdminData();
+      } catch(e) {
+        alert("保存失败: " + e.message);
+      }
+    }
+
+    async function sendTestEmail() {
+      var key = document.getElementById("admin-key").value.trim();
+      var toEmail = document.getElementById("test-email-input").value.trim();
+      if (!toEmail) return alert("请输入接收测试邮件的邮箱（例如您的QQ/163邮箱）");
+
+      var btn = document.getElementById("btn-test-email");
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 发送中...';
+
+      try {
+        var res = await fetch("/api/admin/test_email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, test_email: toEmail })
+        });
+        var json = await res.json();
+        alert(json.msg || (json.code === 0 ? "发送成功" : "发送失败"));
+      } catch(e) {
+        alert("请求异常，发送失败");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> 发送测试邮件';
       }
     }
 
