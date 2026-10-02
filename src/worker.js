@@ -1346,7 +1346,11 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin, customConf
       });
       const data = await res.json();
       if (!res.ok) {
-        return { success: false, error: data.message || `Resend 接口返回错误 (HTTP ${res.status})` };
+        let errMsg = data.message || `Resend 接口返回错误 (HTTP ${res.status})`;
+        if (errMsg.includes("You can only send testing emails to your own email address")) {
+          errMsg = `【Resend 免费沙盒限制】：当前发件人使用的是 Resend 测试域名 (onboarding@resend.dev)，只能向您注册 Resend 的主邮箱发送！\n\n👉 方案1（立即测试）：测试接收邮箱请输入【${errMsg.match(/\(([^)]+)\)/)?.[1] || '您的注册邮箱'}】，即可秒成功收到邮件！\n\n👉 方案2（正式发给所有买家）：在 resend.com/domains 免费添加并验证您的域名（添加3条DNS记录），随后发件人填写您的域名邮箱（如 service@yourdomain.com），即可向任意 QQ/163/Gmail 等买家邮箱群发！`;
+        }
+        return { success: false, error: errMsg };
       }
       return { success: true, id: data.id };
     } catch (err) {
