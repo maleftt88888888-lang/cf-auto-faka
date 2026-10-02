@@ -3233,7 +3233,7 @@ function getFrontendHTML(env) {
                 '<div class="flex justify-between items-center text-xs text-slate-500 pt-1 border-t border-slate-800/60">' +
                   '<span>下单: ' + o.created_at + '</span>' +
                   '<div class="flex items-center gap-3">' +
-                    (o.status === 1 ? '<button onclick="querySendEmail(\'' + o.order_no + '\', \'' + (o.contact || '') + '\')" class="text-indigo-400 hover:text-indigo-300 font-medium text-xs flex items-center gap-1"><i class="fa-solid fa-envelope"></i> 发至邮箱</button>' : '') +
+                    (o.status === 1 ? '<button data-no="' + o.order_no + '" data-contact="' + (o.contact || '') + '" onclick="querySendEmail(this.dataset.no, this.dataset.contact)" class="text-indigo-400 hover:text-indigo-300 font-medium text-xs flex items-center gap-1"><i class="fa-solid fa-envelope"></i> 发至邮箱</button>' : '') +
                     statusHtml +
                   '</div>' +
                 '</div>' +
