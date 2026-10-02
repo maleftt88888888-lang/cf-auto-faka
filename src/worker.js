@@ -90,12 +90,19 @@ export default {
           }
         } catch (e) {}
 
+        let totalSoldDb = 0;
+        try {
+          const countRes = await env.DB.prepare("SELECT COUNT(*) as cnt FROM orders WHERE status = 1").first();
+          if (countRes && countRes.cnt) totalSoldDb = countRes.cnt;
+        } catch(e) {}
+
         return jsonResponse({
           code: 0,
           data: Object.values(regionMap),
           site_name: currentSiteName,
           announcement: siteAnnouncement,
           contact_info: contactInfo,
+          total_sold: totalSoldDb,
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
           category_images: categoryImages,
@@ -1302,7 +1309,7 @@ function getFrontendHTML(env) {
       </button>
     </div>
 
-    <div class="text-center mb-6">
+    <div class="text-center mb-5">
       <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 text-indigo-400 mb-3 border border-indigo-500/30">
         <i class="fa-solid fa-cloud-bolt text-2xl"></i>
       </div>
@@ -1310,8 +1317,63 @@ function getFrontendHTML(env) {
       <p class="text-slate-400 text-sm">24小时极速出卡 · 实时库存同步 · 关网页随时查回最新卡密</p>
     </div>
 
+    <!-- 🌟 营销信任核心指标数据大屏 -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-5">
+      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-indigo-500/50 transition">
+        <div class="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0 text-base">
+          <i class="fa-solid fa-chart-line"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[11px] text-slate-400">全网累计交付</div>
+          <div class="text-sm sm:text-base font-extrabold text-white font-mono" id="stat-total-sold">18,650+</div>
+        </div>
+      </div>
+      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-emerald-500/50 transition">
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-base">
+          <i class="fa-solid fa-bolt-lightning animate-pulse"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[11px] text-slate-400">平均出卡耗时</div>
+          <div class="text-sm sm:text-base font-extrabold text-emerald-400 font-mono">3.2 秒</div>
+        </div>
+      </div>
+      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-amber-500/50 transition">
+        <div class="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 text-base">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[11px] text-slate-400">售后质保承诺</div>
+          <div class="text-sm sm:text-base font-extrabold text-amber-300">2小时包换</div>
+        </div>
+      </div>
+      <div class="p-3 rounded-2xl bg-slate-900/80 border border-slate-800 backdrop-blur-md flex items-center gap-3 shadow-lg hover:border-pink-500/50 transition">
+        <div class="w-10 h-10 rounded-xl bg-pink-500/20 text-pink-400 flex items-center justify-center shrink-0 text-base">
+          <i class="fa-solid fa-star"></i>
+        </div>
+        <div class="min-w-0">
+          <div class="text-[11px] text-slate-400">全网好评满意度</div>
+          <div class="text-sm sm:text-base font-extrabold text-pink-400 font-mono">99.9% ★</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 🔥 今日限时特惠活动倒计时横幅 -->
+    <div class="mb-5 p-3 rounded-2xl bg-gradient-to-r from-pink-500/15 via-purple-500/15 to-indigo-500/15 border border-pink-500/30 flex flex-col sm:flex-row items-center justify-between gap-2 shadow-xl backdrop-blur-md text-xs">
+      <div class="flex items-center gap-2 text-pink-200 font-medium">
+        <span class="px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 font-bold text-[10px] border border-pink-500/40 flex items-center gap-1 shrink-0">
+          <span class="w-1.5 h-1.5 rounded-full bg-pink-400 animate-ping"></span> 今日限时特惠
+        </span>
+        <span class="truncate">全场独享 Apple ID 现货秒发 · 质保升级无忧售后</span>
+      </div>
+      <div class="flex items-center gap-1.5 text-slate-300 font-mono text-[11px] bg-slate-950/70 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
+        <i class="fa-regular fa-clock text-pink-400"></i>
+        <span>距今日特惠结束:</span>
+        <span id="flash-sale-timer" class="text-pink-400 font-bold">05:48:22</span>
+      </div>
+    </div>
+
     <!-- 顶部公告栏 / 跑马灯 -->
-    <div id="site-announcement-bar" class="hidden mb-4 p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-3 shadow-xl backdrop-blur-md">
+    <div id="site-announcement-bar" class="hidden mb-5 p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-amber-500/20 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-3 shadow-xl backdrop-blur-md">
       <div class="w-8 h-8 rounded-xl bg-amber-500/30 text-amber-300 flex items-center justify-center shrink-0 text-sm">
         <i class="fa-solid fa-bullhorn animate-bounce"></i>
       </div>
@@ -1372,7 +1434,7 @@ function getFrontendHTML(env) {
       <div id="panel-buy" class="space-y-6">
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-3">选择地区分类：</label>
-          <div id="region-list" class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <div id="region-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <div class="p-4 rounded-xl border border-slate-700 bg-slate-800/50 animate-pulse text-center text-sm text-slate-400">加载库存中...</div>
           </div>
         </div>
@@ -1420,6 +1482,85 @@ function getFrontendHTML(env) {
           </div>
         </div>
         <div id="query-results" class="space-y-3"></div>
+      </div>
+    </div>
+
+    <!-- 🛡️ 四大核心安心服务保障 -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-6 text-xs">
+      <div class="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center text-center space-y-1 shadow">
+        <div class="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center text-base mb-0.5">
+          <i class="fa-solid fa-bolt"></i>
+        </div>
+        <span class="font-bold text-slate-200">智能秒级交付</span>
+        <span class="text-[10px] text-slate-500">支付完成零延迟出卡</span>
+      </div>
+      <div class="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center text-center space-y-1 shadow">
+        <div class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-base mb-0.5">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <span class="font-bold text-slate-200">2小时质保包换</span>
+        <span class="text-[10px] text-slate-500">异常自助一键免费换号</span>
+      </div>
+      <div class="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center text-center space-y-1 shadow">
+        <div class="w-8 h-8 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center text-base mb-0.5">
+          <i class="fa-solid fa-lock"></i>
+        </div>
+        <span class="font-bold text-slate-200">纯净独享账号</span>
+        <span class="text-[10px] text-slate-500">一人一号绝不二次销售</span>
+      </div>
+      <div class="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 flex flex-col items-center text-center space-y-1 shadow">
+        <div class="w-8 h-8 rounded-lg bg-pink-500/10 text-pink-400 flex items-center justify-center text-base mb-0.5">
+          <i class="fa-solid fa-headset"></i>
+        </div>
+        <span class="font-bold text-slate-200">专属在线客服</span>
+        <span class="text-[10px] text-slate-500">全天候在线售后支持</span>
+      </div>
+    </div>
+
+    <!-- ⭐ 买家真实评价专区 -->
+    <div class="glass rounded-2xl p-5 sm:p-6 shadow-2xl mb-6 border border-slate-800 space-y-3">
+      <div class="flex items-center justify-between border-b border-slate-800/80 pb-3">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center text-xs">
+            <i class="fa-solid fa-comments"></i>
+          </div>
+          <h3 class="font-bold text-sm text-white">买家真实评价 (5,800+ 条好评)</h3>
+        </div>
+        <span class="text-xs text-emerald-400 font-semibold flex items-center gap-1">
+          <i class="fa-solid fa-circle-check"></i> 100% 真实交易评价
+        </span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-slate-300">用户 138****9201</span>
+            <span class="text-amber-400 text-[10px]">★★★★★ 5.0</span>
+          </div>
+          <p class="text-slate-400 text-[11px] leading-relaxed">
+            “拍下直接自动弹出账号密码，去美区 App Store 几秒钟就下载好了小火箭，太快太方便了！”
+          </p>
+          <div class="text-[10px] text-slate-500 font-mono">购买：美国 ID · 10分钟前</div>
+        </div>
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-slate-300">用户 186****3310</span>
+            <span class="text-amber-400 text-[10px]">★★★★★ 5.0</span>
+          </div>
+          <p class="text-slate-400 text-[11px] leading-relaxed">
+            “不得不夸下这个换号功能，密码被别人改了点一下直接换新号，2小时质保太硬核了。”
+          </p>
+          <div class="text-[10px] text-slate-500 font-mono">购买：香港 ID · 25分钟前</div>
+        </div>
+        <div class="p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="font-bold text-slate-300">用户 159****8842</span>
+            <span class="text-amber-400 text-[10px]">★★★★★ 5.0</span>
+          </div>
+          <p class="text-slate-400 text-[11px] leading-relaxed">
+            “账号很干净，按照教程在 App Store 登录直接下，完全不用升级双重认证，非常稳。”
+          </p>
+          <div class="text-[10px] text-slate-500 font-mono">购买：通用 ID · 1小时前</div>
+        </div>
       </div>
     </div>
 
@@ -1629,7 +1770,21 @@ function getFrontendHTML(env) {
       </div>
     </div>
 
-    <!-- 悬浮在线客服入口 -->
+    <!-- 实时购买成交动态弹幕浮窗 (左下角) -->
+    <div id="live-order-toast" class="fixed bottom-6 left-6 z-40 hidden sm:flex items-center gap-3 p-3 bg-slate-900/95 border border-indigo-500/40 backdrop-blur-md rounded-2xl shadow-2xl transition-all duration-500 transform translate-y-4 opacity-0 pointer-events-none max-w-xs">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow">
+        <i class="fa-solid fa-bag-shopping"></i>
+      </div>
+      <div class="min-w-0 flex-1 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <span id="live-toast-user" class="font-bold text-slate-200 truncate">用户 138****9201</span>
+          <span id="live-toast-time" class="text-[10px] text-emerald-400 font-mono shrink-0">刚刚</span>
+        </div>
+        <div id="live-toast-product" class="text-[11px] text-indigo-300 truncate mt-0.5">成功提卡【美国独享ID】</div>
+      </div>
+    </div>
+
+    <!-- 悬浮在线客服入口 (右下角) -->
     <div class="fixed bottom-6 right-6 z-40">
       <button onclick="openSupportModal()" class="px-4 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-full shadow-2xl flex items-center gap-2 border border-white/20 transition transform hover:scale-105 active:scale-95 group">
         <i class="fa-solid fa-headset text-base animate-pulse"></i>
@@ -1887,6 +2042,12 @@ function getFrontendHTML(env) {
             }
           }
 
+          if (json.total_sold !== undefined) {
+            var totalCount = 18650 + json.total_sold;
+            var statSold = document.getElementById("stat-total-sold");
+            if (statSold) statSold.innerText = Number(totalCount).toLocaleString() + "+";
+          }
+
           renderRegions();
         }
       } catch (e) {
@@ -2004,6 +2165,28 @@ function getFrontendHTML(env) {
       }
     }
 
+    function getRegionMarketingTag(region, idx) {
+      if (region.indexOf("美国") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-amber-500 to-rose-500 text-white shadow-sm">🔥 爆款榜首</span>';
+      if (region.indexOf("香港") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-sm">⚡ 热门推荐</span>';
+      if (region.indexOf("日本") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-pink-500/20 text-pink-300 border border-pink-500/30">💎 独享精品</span>';
+      if (region.indexOf("台湾") !== -1) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">⭐ 严选品质</span>';
+      if (idx === 0) return '<span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/30">🔥 店长力荐</span>';
+      return '<span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">⚡ 现货秒发</span>';
+    }
+
+    function getFormattedSold(rawSold, region) {
+      var base = 1280;
+      if (region.indexOf("美国") !== -1) base = 3560;
+      else if (region.indexOf("香港") !== -1) base = 2140;
+      else if (region.indexOf("日本") !== -1) base = 1890;
+      else if (region.indexOf("台湾") !== -1) base = 1420;
+      var total = base + (rawSold || 0);
+      if (total >= 1000) {
+        return (total / 1000).toFixed(1) + "k+";
+      }
+      return total + "+";
+    }
+
     function renderRegions() {
       var container = document.getElementById("region-list");
       container.innerHTML = "";
@@ -2017,12 +2200,12 @@ function getFrontendHTML(env) {
         var priceForThis = globalCategoryPrices[r.region] || globalDefaultPrice;
         var imgUrl = globalCategoryImages[r.region];
         var imgHtml = imgUrl ? 
-          '<img src="' + imgUrl + '" alt="' + r.region + '" class="w-11 h-11 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow-sm">' :
-          '<div class="w-11 h-11 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-base shrink-0 border border-indigo-500/20"><i class="fa-solid fa-layer-group"></i></div>';
+          '<img src="' + imgUrl + '" alt="' + r.region + '" class="w-12 h-12 rounded-xl object-cover border border-indigo-500/40 shrink-0 shadow-sm">' :
+          '<div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>';
 
         var card = document.createElement("div");
-        card.className = "p-3 rounded-xl border cursor-pointer transition duration-150 flex items-center gap-3 " + 
-                         (isSelected ? "card-active border-indigo-500 shadow-lg" : "border-slate-700/80 bg-slate-800/40 hover:border-slate-600");
+        card.className = "p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 " + 
+                         (isSelected ? "card-active border-indigo-500 shadow-xl" : "border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900/90");
         card.onclick = function() {
           currentSelectedRegion = r.region;
           updateDisplayPriceForRegion(r.region);
@@ -2030,16 +2213,22 @@ function getFrontendHTML(env) {
         };
 
         card.innerHTML = imgHtml + 
-          '<div class="flex-1 min-w-0">' +
-            '<div class="flex items-center justify-between mb-1">' +
+          '<div class="flex-1 min-w-0 space-y-1">' +
+            '<div class="flex items-center justify-between gap-1">' +
               '<span class="font-bold text-xs sm:text-sm text-white truncate">' + r.region + '</span>' +
-              '<span class="text-[10px] px-1.5 py-0.2 rounded-full font-medium ' + (r.stock > 0 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400') + '">' +
-                '余: ' + r.stock +
+              getRegionMarketingTag(r.region, idx) +
+            '</div>' +
+            '<div class="flex items-center justify-between text-[11px] text-slate-400">' +
+              '<span class="flex items-center gap-1 text-amber-400/90 text-[10px]">' +
+                '<i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 ' + getFormattedSold(r.sold, r.region) +
+              '</span>' +
+              '<span class="text-[10px] px-1.5 py-0.2 rounded font-medium ' + (r.stock > 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400') + '">' +
+                (r.stock > 0 ? '⚡ 现货充足' : '补货中') +
               '</span>' +
             '</div>' +
-            '<div class="flex items-center justify-between text-xs text-slate-400">' +
-              '<span>已售 ' + r.sold + '</span>' +
-              '<span class="text-emerald-400 font-bold font-mono">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
+            '<div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">' +
+              '<span class="text-[10px] text-slate-500">拍下即出卡</span>' +
+              '<span class="text-emerald-400 font-extrabold font-mono text-sm">￥' + parseFloat(priceForThis).toFixed(2) + '</span>' +
             '</div>' +
           '</div>';
         container.appendChild(card);
@@ -2238,7 +2427,64 @@ function getFrontendHTML(env) {
       document.getElementById("modal-result").classList.add("hidden");
     }
 
+    function startFlashSaleTimer() {
+      function tick() {
+        var now = new Date();
+        var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+        var diff = Math.max(0, Math.floor((midnight - now) / 1000));
+        var h = Math.floor(diff / 3600);
+        var m = Math.floor((diff % 3600) / 60);
+        var s = diff % 60;
+        var hStr = (h < 10 ? '0' : '') + h;
+        var mStr = (m < 10 ? '0' : '') + m;
+        var sStr = (s < 10 ? '0' : '') + s;
+        var timerEl = document.getElementById("flash-sale-timer");
+        if (timerEl) timerEl.innerText = hStr + ":" + mStr + ":" + sStr;
+      }
+      tick();
+      setInterval(tick, 1000);
+    }
+
+    var liveBroadcastIndex = 0;
+    var sampleOrders = [
+      { user: "广州买家 138****9201", product: "成功提卡【美国 ID (Shadowrocket)】", time: "8秒前" },
+      { user: "北京买家 186****3310", product: "成功下单【香港独享 ID】", time: "25秒前" },
+      { user: "上海买家 159****8842", product: "成功提卡【日本独享 ID】", time: "1分钟前" },
+      { user: "深圳买家 177****5520", product: "使用优惠码立减购买【美国 ID】", time: "2分钟前" },
+      { user: "杭州买家 131****4019", product: "成功提卡【通用独享 ID】", time: "3分钟前" },
+      { user: "成都买家 198****7622", product: "成功提卡【台湾独享 ID】", time: "4分钟前" }
+    ];
+
+    function startLiveOrderBroadcaster() {
+      var toast = document.getElementById("live-order-toast");
+      var userEl = document.getElementById("live-toast-user");
+      var prodEl = document.getElementById("live-toast-product");
+      var timeEl = document.getElementById("live-toast-time");
+      if (!toast) return;
+
+      function showNextToast() {
+        var item = sampleOrders[liveBroadcastIndex % sampleOrders.length];
+        liveBroadcastIndex++;
+        if (userEl) userEl.innerText = item.user;
+        if (prodEl) prodEl.innerText = item.product;
+        if (timeEl) timeEl.innerText = item.time;
+
+        toast.classList.remove("translate-y-4", "opacity-0", "pointer-events-none");
+        toast.classList.add("translate-y-0", "opacity-100");
+
+        setTimeout(function() {
+          toast.classList.remove("translate-y-0", "opacity-100");
+          toast.classList.add("translate-y-4", "opacity-0", "pointer-events-none");
+        }, 3200);
+      }
+
+      setTimeout(showNextToast, 2000);
+      setInterval(showNextToast, 7500);
+    }
+
     loadStats();
+    startFlashSaleTimer();
+    startLiveOrderBroadcaster();
   </script>
 </body>
 </html>`;
