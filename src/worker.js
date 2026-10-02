@@ -1635,7 +1635,122 @@ function getFrontendHTML(env) {
       <div id="panel-buy" class="space-y-6">
         <div>
           <label class="block text-sm font-medium text-slate-300 mb-3">选择地区分类：</label>
-          <div id="region-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+          <div id="region-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 card-active border-indigo-500 shadow-xl" onclick="currentSelectedRegion='美国';updateDisplayPriceForRegion('美国');openCheckoutModal('美国')">
+              <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="font-bold text-xs sm:text-sm text-white truncate">美国</span>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-amber-500 to-rose-500 text-white shadow-sm">🔥 爆款榜首</span>
+                </div>
+                <div class="flex items-center justify-between text-[11px] text-slate-400">
+                  <span class="flex items-center gap-1 text-amber-400/90 text-[10px]"><i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 3.6k+</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded font-medium bg-emerald-500/20 text-emerald-400">⚡ 现货充足</span>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">
+                  <div>
+                    <span class="text-[10px] text-slate-500 mr-1">现货秒出</span>
+                    <span class="text-emerald-400 font-extrabold font-mono text-sm">￥4.99</span>
+                  </div>
+                  <button type="button" onclick="event.stopPropagation();openCheckoutModal('美国')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">
+                    <i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900/90" onclick="currentSelectedRegion='香港';updateDisplayPriceForRegion('香港');openCheckoutModal('香港')">
+              <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="font-bold text-xs sm:text-sm text-white truncate">香港</span>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-sm">⚡ 热门推荐</span>
+                </div>
+                <div class="flex items-center justify-between text-[11px] text-slate-400">
+                  <span class="flex items-center gap-1 text-amber-400/90 text-[10px]"><i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 2.1k+</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded font-medium bg-emerald-500/20 text-emerald-400">⚡ 现货充足</span>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">
+                  <div>
+                    <span class="text-[10px] text-slate-500 mr-1">现货秒出</span>
+                    <span class="text-emerald-400 font-extrabold font-mono text-sm">￥4.99</span>
+                  </div>
+                  <button type="button" onclick="event.stopPropagation();openCheckoutModal('香港')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">
+                    <i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900/90" onclick="currentSelectedRegion='日本';updateDisplayPriceForRegion('日本');openCheckoutModal('日本')">
+              <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="font-bold text-xs sm:text-sm text-white truncate">日本</span>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-pink-500/20 text-pink-300 border border-pink-500/30">💎 独享精品</span>
+                </div>
+                <div class="flex items-center justify-between text-[11px] text-slate-400">
+                  <span class="flex items-center gap-1 text-amber-400/90 text-[10px]"><i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 1.9k+</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded font-medium bg-emerald-500/20 text-emerald-400">⚡ 现货充足</span>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">
+                  <div>
+                    <span class="text-[10px] text-slate-500 mr-1">现货秒出</span>
+                    <span class="text-emerald-400 font-extrabold font-mono text-sm">￥4.99</span>
+                  </div>
+                  <button type="button" onclick="event.stopPropagation();openCheckoutModal('日本')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">
+                    <i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900/90" onclick="currentSelectedRegion='台湾';updateDisplayPriceForRegion('台湾');openCheckoutModal('台湾')">
+              <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="font-bold text-xs sm:text-sm text-white truncate">台湾</span>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">⭐ 严选品质</span>
+                </div>
+                <div class="flex items-center justify-between text-[11px] text-slate-400">
+                  <span class="flex items-center gap-1 text-amber-400/90 text-[10px]"><i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 1.4k+</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded font-medium bg-emerald-500/20 text-emerald-400">⚡ 现货充足</span>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">
+                  <div>
+                    <span class="text-[10px] text-slate-500 mr-1">现货秒出</span>
+                    <span class="text-emerald-400 font-extrabold font-mono text-sm">￥4.99</span>
+                  </div>
+                  <button type="button" onclick="event.stopPropagation();openCheckoutModal('台湾')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">
+                    <i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="p-3.5 rounded-2xl border cursor-pointer transition duration-150 flex items-center gap-3 border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900/90" onclick="currentSelectedRegion='通用';updateDisplayPriceForRegion('通用');openCheckoutModal('通用')">
+              <div class="w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400 flex items-center justify-center font-bold text-lg shrink-0 border border-indigo-500/30"><i class="fa-solid fa-layer-group"></i></div>
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="font-bold text-xs sm:text-sm text-white truncate">通用</span>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/30">🔥 店长力荐</span>
+                </div>
+                <div class="flex items-center justify-between text-[11px] text-slate-400">
+                  <span class="flex items-center gap-1 text-amber-400/90 text-[10px]"><i class="fa-solid fa-star text-[9px]"></i> 5.0 · 已售 1.3k+</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded font-medium bg-emerald-500/20 text-emerald-400">⚡ 现货充足</span>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800/80 text-xs">
+                  <div>
+                    <span class="text-[10px] text-slate-500 mr-1">现货秒出</span>
+                    <span class="text-emerald-400 font-extrabold font-mono text-sm">￥4.99</span>
+                  </div>
+                  <button type="button" onclick="event.stopPropagation();openCheckoutModal('通用')" class="px-3 py-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-md shadow-indigo-500/20 transition transform active:scale-95">
+                    <i class="fa-solid fa-cart-shopping text-[10px]"></i> 购买
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div>
