@@ -4955,7 +4955,7 @@ function getAdminHTML(env) {
     <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row gap-2 justify-between items-center">
       <div class="flex gap-2 w-full sm:w-auto flex-1">
         <input type="password" id="admin-key" placeholder="输入管理员密钥" class="flex-1 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-white font-mono">
-        <button onclick="loadAdminData()" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-medium">刷新</button>
+        <button onclick="loadAdminData(true)" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-medium">刷新</button>
         <button onclick="syncLiveAccounts()" id="btn-sync-live" class="px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow transition" title="从源站 haoged.top 同步最新检查、正常状态的账号卡密">
           <i class="fa-solid fa-arrows-rotate"></i> 同步源站
         </button>
@@ -5961,7 +5961,7 @@ function getAdminHTML(env) {
       }
     }
 
-    function renderFloorPricesTable(categories, floorPrices) {
+    function renderFloorPricesTable(categories, floorPrices, isForce) {
       var container = document.getElementById("floor-price-inputs-container");
       if (!container) return;
       if (floorPrices && typeof floorPrices === "object") {
@@ -5975,6 +5975,21 @@ function getAdminHTML(env) {
       }
       var cats = (categories && Array.isArray(categories) && categories.length > 0) ? categories.map(cleanCatStr).filter(Boolean) : currentCategories;
       cats = Array.from(new Set(cats));
+
+      var newFloorState = JSON.stringify({ c: cats, fp: currentFloorPrices });
+      if (!isForce) {
+        if (container.contains(document.activeElement)) {
+          return; // 站长正在输入供货底价，禁止4秒刷新打断
+        }
+        var dirtyFloor = container.querySelectorAll(".floor-price-input[data-dirty='true']");
+        if (dirtyFloor.length > 0) {
+          return;
+        }
+        if (container._lastState === newFloorState) {
+          return; // 数据无变动，避免反复重绘
+        }
+      }
+      container._lastState = newFloorState;
 
       var html = cats.map(function(rawCat) {
         var cat = cleanCatStr(rawCat);
@@ -6023,6 +6038,10 @@ function getAdminHTML(env) {
         if (json.code === 0) {
           alert(json.msg || "🎉 供货底价已成功保存并立即生效！");
           currentFloorPrices = map;
+          inputs.forEach(function(inp) { inp.dataset.dirty = ""; });
+          var container = document.getElementById("floor-price-inputs-container");
+          if (container) container._lastState = "";
+          loadAdminData(true);
         } else {
           alert(json.msg || "保存底价失败");
         }
@@ -6031,13 +6050,20 @@ function getAdminHTML(env) {
       }
     }
 
-    function renderAffiliatesTable(affiliates) {
+    function renderAffiliatesTable(affiliates, isForce) {
       var container = document.getElementById("affiliates-table-container");
       var countLabel = document.getElementById("affiliates-count-label");
       if (!container) return;
       currentAffiliates = affiliates || [];
 
       if (countLabel) countLabel.innerText = "合伙人: " + currentAffiliates.length + " 位";
+
+      var newAffState = JSON.stringify(currentAffiliates);
+      if (!isForce) {
+        if (container.contains(document.activeElement)) return;
+        if (container._lastState === newAffState) return;
+      }
+      container._lastState = newAffState;
 
       if (currentAffiliates.length === 0) {
         container.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无分销合伙人记录</div>';
@@ -6118,7 +6144,7 @@ function getAdminHTML(env) {
       }
     }
 
-    async function loadAdminData() {
+    async function loadAdminData(isForce) {
       var keyInput = document.getElementById("admin-key");
       var key = (keyInput ? keyInput.value.trim() : "") || localStorage.getItem("faka_admin_key") || sessionStorage.getItem("faka_admin_key");
       if (!key) {
@@ -6145,47 +6171,76 @@ function getAdminHTML(env) {
         }
 
         if (json.code === 0) {
+          var activeEl = document.activeElement;
+
+          // 1. 基准价格保护：正在编辑或站长有输入时绝不覆盖
           if (json.price) {
-            document.getElementById("price-input").value = json.price;
             var priceBadge = document.getElementById("current-price-badge");
             if (priceBadge) priceBadge.innerText = "当前价格: ￥" + json.price;
+            var priceInp = document.getElementById("price-input");
+            if (priceInp) {
+              if (isForce || (activeEl !== priceInp && !priceInp.dataset.dirty)) {
+                priceInp.value = json.price;
+              }
+            }
           }
 
+          // 2. 网站设置各表单输入项防冲刷保护
           if (json.site_name) {
             var siteInput = document.getElementById("sitename-input");
-            if (siteInput && !siteInput.value) siteInput.value = json.site_name;
+            if (siteInput && (isForce || (activeEl !== siteInput && !siteInput.dataset.dirty && !siteInput.value))) {
+              siteInput.value = json.site_name;
+            }
           }
 
           if (json.announcement !== undefined) {
             var annInput = document.getElementById("announcement-input");
-            if (annInput && !annInput.value) annInput.value = json.announcement || "";
+            if (annInput && (isForce || (activeEl !== annInput && !annInput.dataset.dirty && !annInput.value))) {
+              annInput.value = json.announcement || "";
+            }
           }
 
           if (json.pushplus_token) {
             var tokenInput = document.getElementById("pushplus-token-input");
-            if (tokenInput && !tokenInput.value) tokenInput.value = json.pushplus_token;
+            if (tokenInput && (isForce || (activeEl !== tokenInput && !tokenInput.dataset.dirty && !tokenInput.value))) {
+              tokenInput.value = json.pushplus_token;
+            }
           }
 
           if (json.qrcode) {
-            document.getElementById("current-qrcode-preview").src = json.qrcode;
-            document.getElementById("current-qrcode-preview").classList.remove("hidden");
-            document.getElementById("no-qrcode-text").classList.add("hidden");
+            var qrImg = document.getElementById("current-qrcode-preview");
+            if (qrImg) {
+              qrImg.src = json.qrcode;
+              qrImg.classList.remove("hidden");
+              qrImg.style.display = "block";
+            }
+            var noQrText = document.getElementById("no-qrcode-text");
+            if (noQrText) {
+              noQrText.classList.add("hidden");
+              noQrText.style.display = "none";
+            }
             var qrUrlInp = document.getElementById("qrcode-url-input");
-            if (qrUrlInp && !qrUrlInp.value && json.qrcode.startsWith("http")) {
+            if (qrUrlInp && (isForce || (activeEl !== qrUrlInp && !qrUrlInp.dataset.dirty && !qrUrlInp.value && json.qrcode.startsWith("http")))) {
               qrUrlInp.value = json.qrcode;
             }
           }
 
           if (json.pay_note !== undefined) {
             var noteInp = document.getElementById("pay-note-setting-input");
-            if (noteInp && !noteInp.value) noteInp.value = json.pay_note || "";
+            if (noteInp && (isForce || (activeEl !== noteInp && !noteInp.dataset.dirty && !noteInp.value))) {
+              noteInp.value = json.pay_note || "";
+            }
           }
 
           if (json.email_config) {
             var keyInp = document.getElementById("email-resend-key");
             var fromInp = document.getElementById("email-from-addr");
-            if (keyInp && !keyInp.value) keyInp.value = json.email_config.resend_key || "";
-            if (fromInp && !fromInp.value) fromInp.value = json.email_config.from_email || "";
+            if (keyInp && (isForce || (activeEl !== keyInp && !keyInp.dataset.dirty && !keyInp.value))) {
+              keyInp.value = json.email_config.resend_key || "";
+            }
+            if (fromInp && (isForce || (activeEl !== fromInp && !fromInp.dataset.dirty && !fromInp.value))) {
+              fromInp.value = json.email_config.from_email || "";
+            }
           }
 
           if (json.contact_info) {
@@ -6196,19 +6251,23 @@ function getAdminHTML(env) {
             var cQrPrev = document.getElementById("contact-qr-preview");
             var noQrTxt = document.getElementById("no-contact-qr-text");
 
-            if (cWechat && !cWechat.value) cWechat.value = json.contact_info.wechat || "";
-            if (cTg && !cTg.value) cTg.value = json.contact_info.telegram || "";
-            if (cQq && !cQq.value) cQq.value = json.contact_info.qq || "";
-            if (cTip && !cTip.value) cTip.value = json.contact_info.custom_tip || "";
+            if (cWechat && (isForce || (activeEl !== cWechat && !cWechat.dataset.dirty && !cWechat.value))) cWechat.value = json.contact_info.wechat || "";
+            if (cTg && (isForce || (activeEl !== cTg && !cTg.dataset.dirty && !cTg.value))) cTg.value = json.contact_info.telegram || "";
+            if (cQq && (isForce || (activeEl !== cQq && !cQq.dataset.dirty && !cQq.value))) cQq.value = json.contact_info.qq || "";
+            if (cTip && (isForce || (activeEl !== cTip && !cTip.dataset.dirty && !cTip.value))) cTip.value = json.contact_info.custom_tip || "";
             if (json.contact_info.wechat_qr && cQrPrev) {
               cQrPrev.src = json.contact_info.wechat_qr;
               cQrPrev.classList.remove("hidden");
-              if (noQrTxt) noQrTxt.classList.add("hidden");
+              cQrPrev.style.display = "block";
+              if (noQrTxt) {
+                noQrTxt.classList.add("hidden");
+                noQrTxt.style.display = "none";
+              }
             }
           }
 
           if (json.coupons) {
-            renderCouponsTable(json.coupons);
+            renderCouponsTable(json.coupons, isForce);
           }
 
           // 核心分类逻辑：严格拆分【买家已提交付款】与【仅下单未付款】
@@ -6267,15 +6326,15 @@ function getAdminHTML(env) {
 
           // 渲染品类定价及封面 (优先更新品类与独立单价)
           if (json.categories || json.category_prices || json.category_images) {
-            renderCategoryPriceTable(json.categories, json.category_prices, json.category_images);
+            renderCategoryPriceTable(json.categories, json.category_prices, json.category_images, isForce);
           }
 
           // 渲染供货底价与合伙人列表
           if (json.floor_prices !== undefined || json.categories) {
-            renderFloorPricesTable(json.categories, json.floor_prices);
+            renderFloorPricesTable(json.categories, json.floor_prices, isForce);
           }
           if (json.affiliates) {
-            renderAffiliatesTable(json.affiliates);
+            renderAffiliatesTable(json.affiliates, isForce);
           }
 
           // 渲染订单列表（支持即时关键词筛选）
@@ -6327,7 +6386,7 @@ function getAdminHTML(env) {
 
 
 
-    function renderCategoryPriceTable(categories, prices, images) {
+    function renderCategoryPriceTable(categories, prices, images, isForce) {
       if (categories && Array.isArray(categories)) {
         currentCategories = categories.map(cleanCatStr).filter(Boolean);
         currentCategories = Array.from(new Set(currentCategories));
@@ -6350,6 +6409,21 @@ function getAdminHTML(env) {
       }
       var container = document.getElementById("category-price-table");
       if (!container) return;
+
+      var newCatState = JSON.stringify({ c: currentCategories, p: currentCategoryPrices, i: currentCategoryImages });
+      if (!isForce) {
+        if (container.contains(document.activeElement)) {
+          return; // 站长正在输入品类价格或操作，绝不重绘打断
+        }
+        var dirtyInputs = container.querySelectorAll(".cat-price-input[data-dirty='true']");
+        if (dirtyInputs.length > 0) {
+          return;
+        }
+        if (container._lastState === newCatState) {
+          return; // 数据未变化，无需重绘 DOM
+        }
+      }
+      container._lastState = newCatState;
 
       var html = currentCategories.map(function(rawCat) {
         var cat = cleanCatStr(rawCat);
@@ -6727,7 +6801,10 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "品类定价保存成功");
-        loadAdminData();
+        inputs.forEach(function(inp) { inp.dataset.dirty = ""; });
+        var catContainer = document.getElementById("category-price-table");
+        if (catContainer) catContainer._lastState = "";
+        loadAdminData(true);
       } catch (e) {
         alert("保存失败");
       }
@@ -6828,7 +6905,9 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "价格保存成功");
-        loadAdminData();
+        var priceInp = document.getElementById("price-input");
+        if (priceInp) priceInp.dataset.dirty = "";
+        loadAdminData(true);
       } catch (e) {
         alert("价格保存失败");
       }
@@ -6847,7 +6926,9 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "网站名称保存成功");
-        loadAdminData();
+        var siteInput = document.getElementById("sitename-input");
+        if (siteInput) siteInput.dataset.dirty = "";
+        loadAdminData(true);
       } catch (e) {
         alert("保存失败");
       }
@@ -6865,7 +6946,9 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "公告已保存");
-        loadAdminData();
+        var annInput = document.getElementById("announcement-input");
+        if (annInput) annInput.dataset.dirty = "";
+        loadAdminData(true);
       } catch (e) {
         alert("公告保存失败");
       }
@@ -6890,7 +6973,7 @@ function getAdminHTML(env) {
           document.getElementById("admin-key").value = newKey;
           localStorage.setItem("faka_admin_key", newKey);
           document.getElementById("new-admin-key-input").value = "";
-          loadAdminData();
+          loadAdminData(true);
         } else {
           alert(json.msg || "修改失败");
         }
@@ -6911,7 +6994,9 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "Token 保存成功");
-        loadAdminData();
+        var tokenInput = document.getElementById("pushplus-token-input");
+        if (tokenInput) tokenInput.dataset.dirty = "";
+        loadAdminData(true);
       } catch(e) {
         alert("保存失败");
       }
@@ -6931,7 +7016,7 @@ function getAdminHTML(env) {
         var json = await res.json();
         alert(json.msg || "请求完成");
         if (json.code === 0) {
-          loadAdminData();
+          loadAdminData(true);
         }
       } catch(e) {
         alert("测试失败: " + e.message);
@@ -6950,7 +7035,7 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "清理完成");
-        loadAdminData();
+        loadAdminData(true);
       } catch(e) {
         alert("清理失败");
       }
@@ -6976,7 +7061,11 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "保存成功");
-        loadAdminData();
+        var kInp = document.getElementById("email-resend-key");
+        var fInp = document.getElementById("email-from-addr");
+        if (kInp) kInp.dataset.dirty = "";
+        if (fInp) fInp.dataset.dirty = "";
+        loadAdminData(true);
       } catch(e) {
         alert("保存失败: " + e.message);
       }
@@ -7030,7 +7119,9 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "保存成功");
-        loadAdminData();
+        var noteInp = document.getElementById("pay-note-setting-input");
+        if (noteInp) noteInp.dataset.dirty = "";
+        loadAdminData(true);
       } catch(e) {
         alert("保存失败");
       }
@@ -7201,15 +7292,26 @@ function getAdminHTML(env) {
         });
         var json = await res.json();
         alert(json.msg || "客服配置保存成功");
-        loadAdminData();
+        ["contact-wechat-input", "contact-tg-input", "contact-qq-input", "contact-tip-input"].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.dataset.dirty = "";
+        });
+        loadAdminData(true);
       } catch (e) {
         alert("保存失败");
       }
     }
 
-    function renderCouponsTable(coupons) {
+    function renderCouponsTable(coupons, isForce) {
       var container = document.getElementById("coupon-list-container");
       if (!container) return;
+
+      var newCpnState = JSON.stringify(coupons || []);
+      if (!isForce) {
+        if (container.contains(document.activeElement)) return;
+        if (container._lastState === newCpnState) return;
+      }
+      container._lastState = newCpnState;
 
       if (!coupons || coupons.length === 0) {
         container.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无已创建优惠券</div>';
@@ -7305,8 +7407,17 @@ function getAdminHTML(env) {
 
     function startAdminPolling() {
       if (adminPollTimer) clearInterval(adminPollTimer);
-      adminPollTimer = setInterval(loadAdminData, 4000);
+      adminPollTimer = setInterval(function() {
+        loadAdminData(false);
+      }, 4000);
     }
+
+    // 监听站长输入事件，标记表单已修改，杜绝4秒轮询冲刷覆盖用户正在输入的内容
+    document.addEventListener("input", function(e) {
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) {
+        e.target.dataset.dirty = "true";
+      }
+    });
 
     async function initAdminPage() {
       var urlParams = new URLSearchParams(window.location.search);
