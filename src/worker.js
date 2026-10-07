@@ -112,6 +112,27 @@ export default {
           }
         } catch (e) {}
 
+        // 检查合伙人分销推荐码 (?aff=code)
+        const affCode = (url.searchParams.get("aff") || "").trim().toLowerCase();
+        let affiliateInfo = null;
+        if (affCode) {
+          try {
+            const affRow = await env.DB.prepare("SELECT code, name, price_config FROM affiliates WHERE code = ? AND status = 1").bind(affCode).first();
+            if (affRow) {
+              affiliateInfo = { code: affRow.code, name: affRow.name || affRow.code };
+              if (affRow.price_config) {
+                try {
+                  const affPrices = JSON.parse(affRow.price_config);
+                  for (const [k, v] of Object.entries(affPrices || {})) {
+                    const ck = cleanCategoryName(k);
+                    if (ck && v) categoryPrices[ck] = v;
+                  }
+                } catch(e) {}
+              }
+            }
+          } catch(e) {}
+        }
+
         const allKnownCategories = Array.from(new Set([
           ...defaultRegions,
           ...customCategories,
@@ -156,6 +177,7 @@ export default {
           price: parseFloat(currentPrice).toFixed(2),
           category_prices: categoryPrices,
           category_images: categoryImages,
+          affiliate: affiliateInfo,
           pay_note: payNote,
           pay_qrcode: qrcode || "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=300"
         }, corsHeaders);
@@ -248,9 +270,45 @@ export default {
             if (catMap && catMap[region]) basePriceStr = catMap[region];
           }
         } catch (e) {}
-        const unitPrice = parseFloat(basePriceStr);
+        let unitPrice = parseFloat(basePriceStr);
         let rawPrice = unitPrice * quantity;
         let finalPrice = rawPrice;
+
+        // 合伙人分销佣金与底价核算
+        const affiliateCode = (body.affiliate_code || "").trim().toLowerCase();
+        let costPrice = unitPrice;
+        let affiliateProfit = 0;
+
+        if (affiliateCode) {
+          try {
+            const affRow = await env.DB.prepare("SELECT * FROM affiliates WHERE code = ? AND status = 1").bind(affiliateCode).first();
+            if (affRow) {
+              if (affRow.price_config) {
+                try {
+                  const affPrices = JSON.parse(affRow.price_config);
+                  if (affPrices && affPrices[region]) {
+                    unitPrice = parseFloat(affPrices[region]);
+                    rawPrice = unitPrice * quantity;
+                    finalPrice = rawPrice;
+                  }
+                } catch(e) {}
+              }
+
+              let floorPriceVal = unitPrice;
+              const floorRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'FLOOR_PRICES'").first();
+              if (floorRow && floorRow.value) {
+                try {
+                  const floorMap = JSON.parse(floorRow.value);
+                  if (floorMap && floorMap[region]) {
+                    floorPriceVal = parseFloat(floorMap[region]);
+                  }
+                } catch(e) {}
+              }
+              costPrice = floorPriceVal;
+              affiliateProfit = Math.max(0, (unitPrice - costPrice) * quantity);
+            }
+          } catch(e) {}
+        }
 
         if (couponCode) {
           try {
@@ -275,9 +333,9 @@ export default {
         const orderNo = "FK" + Date.now().toString().slice(-6) + checkCode;
 
         await env.DB.prepare(`
-          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count, coupon_code)
-          VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0, ?)
-        `).bind(orderNo, region, contact, finalPrice.toFixed(2), `[${payMethod}] 核销码:${checkCode}`, couponCode).run();
+          INSERT INTO orders (order_no, region, contact, price, status, pay_type, created_at, replace_count, coupon_code, affiliate_code, cost_price, affiliate_profit)
+          VALUES (?, ?, ?, ?, 0, ?, datetime('now', '+8 hours'), 0, ?, ?, ?, ?)
+        `).bind(orderNo, region, contact, finalPrice.toFixed(2), `[${payMethod}] 核销码:${checkCode}`, couponCode, affiliateCode, costPrice, affiliateProfit).run();
 
         return jsonResponse({
           code: 0,
@@ -291,7 +349,8 @@ export default {
             pay_method: payMethod,
             original_price: rawPrice.toFixed(2),
             region: region,
-            coupon_code: couponCode
+            coupon_code: couponCode,
+            affiliate_code: affiliateCode
           }
         }, corsHeaders);
       }
@@ -383,6 +442,20 @@ export default {
           SET status = 1, carmi = ?, pay_type = '站长已核销', paid_at = datetime('now', '+8 hours'), replace_count = 0
           WHERE order_no = ?
         `).bind(freshAccount.carmi, orderNo).run();
+
+        // 若为分销合伙人推广订单，自动累计合伙人销售额与分成
+        if (order.affiliate_code) {
+          try {
+            const profit = (order.affiliate_profit !== undefined && order.affiliate_profit !== null && order.affiliate_profit > 0) ? order.affiliate_profit : Math.max(0, (order.price || 0) - (order.cost_price || 0));
+            await env.DB.prepare(`
+              UPDATE affiliates 
+              SET total_sales = total_sales + ?, 
+                  total_profit = total_profit + ?, 
+                  order_count = order_count + 1 
+              WHERE code = ?
+            `).bind(order.price || 0, profit, order.affiliate_code).run();
+          } catch(e) {}
+        }
 
         // 异步检查剩余库存是否告急 (<=3个) 并发送微信提醒
         ctx.waitUntil(checkAndSendLowStockAlert(env, order.region));
@@ -494,17 +567,17 @@ export default {
         }
 
         const pendingOrders = await env.DB.prepare(`
-          SELECT id, order_no, region, contact, price, status, pay_type, created_at
+          SELECT id, order_no, region, contact, price, status, pay_type, created_at, affiliate_code, cost_price, affiliate_profit
           FROM orders
           WHERE status = 0
-          ORDER BY id DESC LIMIT 50
+          ORDER BY id DESC LIMIT 100
         `).all();
 
         const recentPaid = await env.DB.prepare(`
-          SELECT id, order_no, region, contact, price, status, carmi, pay_type, paid_at
+          SELECT id, order_no, region, contact, price, status, carmi, pay_type, paid_at, affiliate_code, cost_price, affiliate_profit
           FROM orders
           WHERE status = 1
-          ORDER BY id DESC LIMIT 20
+          ORDER BY id DESC LIMIT 50
         `).all();
 
         let currentQrcode = "";
@@ -602,10 +675,62 @@ export default {
           }
         } catch(e) {}
 
+        let todayRevenue = 0;
+        let todayOrdersCount = 0;
+        let totalRevenue = 0;
+        let totalPaidCount = 0;
+        let pendingCount = 0;
+
+        try {
+          const todayRow = await env.DB.prepare(`
+            SELECT COALESCE(SUM(price), 0) as rev, COUNT(*) as cnt 
+            FROM orders 
+            WHERE status = 1 AND paid_at >= datetime('now', '+8 hours', 'start of day')
+          `).first();
+          if (todayRow) {
+            todayRevenue = todayRow.rev || 0;
+            todayOrdersCount = todayRow.cnt || 0;
+          }
+
+          const totalRow = await env.DB.prepare(`
+            SELECT COALESCE(SUM(price), 0) as rev, COUNT(*) as cnt 
+            FROM orders 
+            WHERE status = 1
+          `).first();
+          if (totalRow) {
+            totalRevenue = totalRow.rev || 0;
+            totalPaidCount = totalRow.cnt || 0;
+          }
+
+          const pendRow = await env.DB.prepare("SELECT COUNT(*) as cnt FROM orders WHERE status = 0").first();
+          if (pendRow) pendingCount = pendRow.cnt || 0;
+        } catch(e) {}
+
+        let floorPrices = {};
+        try {
+          const fRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'FLOOR_PRICES'").first();
+          if (fRow && fRow.value) floorPrices = JSON.parse(fRow.value);
+        } catch(e) {}
+
+        let affiliatesList = [];
+        try {
+          const affRes = await env.DB.prepare("SELECT * FROM affiliates ORDER BY id DESC LIMIT 50").all();
+          if (affRes && affRes.results) affiliatesList = affRes.results;
+        } catch(e) {}
+
         return jsonResponse({
           code: 0,
           pending: pendingOrders.results || [],
           recent: recentPaid.results || [],
+          stats: {
+            today_revenue: Number(todayRevenue).toFixed(2),
+            today_orders: todayOrdersCount,
+            total_revenue: Number(totalRevenue).toFixed(2),
+            total_paid_orders: totalPaidCount,
+            pending_count: pendingCount
+          },
+          floor_prices: floorPrices,
+          affiliates: affiliatesList,
           qrcode: currentQrcode,
           pay_note: currentPayNote,
           email_config: emailConfig,
@@ -618,6 +743,288 @@ export default {
           category_prices: categoryPrices,
           category_images: categoryImages,
           categories: allCategories
+        }, corsHeaders);
+      }
+
+      // 路由 5.2: 站长后台一键批量出卡发货
+      if (path === "/api/admin/batch_approve" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        let targetOrders = [];
+        if (Array.isArray(body.order_nos) && body.order_nos.length > 0) {
+          for (const no of body.order_nos) {
+            const o = await env.DB.prepare("SELECT * FROM orders WHERE order_no = ? AND status = 0").bind(no).first();
+            if (o) targetOrders.push(o);
+          }
+        } else {
+          const res = await env.DB.prepare("SELECT * FROM orders WHERE status = 0 ORDER BY id ASC LIMIT 50").all();
+          targetOrders = res.results || [];
+        }
+
+        if (targetOrders.length === 0) {
+          return jsonResponse({ code: 0, msg: "当前没有待核销出卡的订单", success_count: 0, fail_count: 0 }, corsHeaders);
+        }
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const order of targetOrders) {
+          try {
+            const freshAccount = await fetchLatestLiveAccount(env, order.region);
+            if (!freshAccount || !freshAccount.carmi) {
+              failCount++;
+              continue;
+            }
+
+            if (freshAccount.id) {
+              await env.DB.prepare("UPDATE carmis SET status = 1, order_no = ?, sold_at = datetime('now', '+8 hours') WHERE id = ?").bind(order.order_no, freshAccount.id).run();
+            }
+            await env.DB.prepare(`
+              UPDATE orders 
+              SET status = 1, carmi = ?, pay_type = '站长已核销(批量)', paid_at = datetime('now', '+8 hours'), replace_count = 0
+              WHERE order_no = ?
+            `).bind(freshAccount.carmi, order.order_no).run();
+
+            if (order.affiliate_code) {
+              try {
+                const profit = (order.affiliate_profit !== undefined && order.affiliate_profit !== null && order.affiliate_profit > 0) ? order.affiliate_profit : Math.max(0, (order.price || 0) - (order.cost_price || 0));
+                await env.DB.prepare(`
+                  UPDATE affiliates 
+                  SET total_sales = total_sales + ?, 
+                      total_profit = total_profit + ?, 
+                      order_count = order_count + 1 
+                  WHERE code = ?
+                `).bind(order.price || 0, profit, order.affiliate_code).run();
+              } catch(e) {}
+            }
+
+            successCount++;
+          } catch(e) {
+            failCount++;
+          }
+        }
+
+        return jsonResponse({
+          code: 0,
+          msg: `⚡ 批量核销发货完成！成功出卡 ${successCount} 单${failCount > 0 ? `，失败 ${failCount} 单（库存不足或源站未就绪）` : ''}！`,
+          success_count: successCount,
+          fail_count: failCount
+        }, corsHeaders);
+      }
+
+      // 路由 5.3: 管理员后台 - 查看各品类库存明细卡密列表
+      if (path === "/api/admin/carmis_list") {
+        const key = url.searchParams.get("key") || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const region = cleanCategoryName(url.searchParams.get("region") || "");
+        const statusParam = url.searchParams.get("status");
+
+        let query = "SELECT id, region, account, password, carmi, status, order_no, created_at, sold_at FROM carmis WHERE 1=1";
+        const params = [];
+
+        if (region) {
+          query += " AND region = ?";
+          params.push(region);
+        }
+        if (statusParam !== null && statusParam !== "" && statusParam !== undefined) {
+          query += " AND status = ?";
+          params.push(parseInt(statusParam));
+        }
+
+        query += " ORDER BY id DESC LIMIT 100";
+
+        let rows = [];
+        if (params.length === 0) {
+          rows = (await env.DB.prepare(query).all()).results || [];
+        } else if (params.length === 1) {
+          rows = (await env.DB.prepare(query).bind(params[0]).all()).results || [];
+        } else {
+          rows = (await env.DB.prepare(query).bind(params[0], params[1]).all()).results || [];
+        }
+
+        let stockCount = 0;
+        let soldCount = 0;
+        if (region) {
+          const statRow = await env.DB.prepare("SELECT COUNT(CASE WHEN status = 0 THEN 1 END) as stock, COUNT(CASE WHEN status = 1 THEN 1 END) as sold FROM carmis WHERE region = ?").bind(region).first();
+          if (statRow) {
+            stockCount = statRow.stock || 0;
+            soldCount = statRow.sold || 0;
+          }
+        }
+
+        return jsonResponse({
+          code: 0,
+          data: rows,
+          stock: stockCount,
+          sold: soldCount
+        }, corsHeaders);
+      }
+
+      // 路由 5.4: 管理员后台 - 删除单条库存卡密
+      if (path === "/api/admin/delete_carmi" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const id = body.id;
+        await env.DB.prepare("DELETE FROM carmis WHERE id = ?").bind(id).run();
+
+        return jsonResponse({ code: 0, msg: "🗑️ 该卡密已从库存库中彻底删除！" }, corsHeaders);
+      }
+
+      // 路由 5.5: 管理员后台 - 设置分销合伙人最低供货底价
+      if (path === "/api/admin/set_floor_prices" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const floorPrices = body.floor_prices || {};
+        const cleanFloor = {};
+        for (const [k, v] of Object.entries(floorPrices)) {
+          const ck = cleanCategoryName(k);
+          if (ck && v) cleanFloor[ck] = parseFloat(v).toFixed(2);
+        }
+
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('FLOOR_PRICES', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(cleanFloor)).run();
+
+        return jsonResponse({ code: 0, msg: "🎉 分销合伙人供货底价已成功保存！" }, corsHeaders);
+      }
+
+      // 路由 5.6: 管理员后台 - 结算合伙人佣金分成
+      if (path === "/api/admin/settle_affiliate" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const code = (body.code || "").trim().toLowerCase();
+        const settleAmount = parseFloat(body.settle_amount || 0);
+
+        if (!code) return jsonResponse({ code: -1, msg: "缺少合伙人代号" }, corsHeaders);
+        if (settleAmount <= 0) return jsonResponse({ code: -1, msg: "结算金额必须大于0" }, corsHeaders);
+
+        await env.DB.prepare(`
+          UPDATE affiliates 
+          SET settled_profit = settled_profit + ? 
+          WHERE code = ?
+        `).bind(settleAmount, code).run();
+
+        return jsonResponse({ code: 0, msg: `🎉 已成功为合伙人【${code}】登记结算 ￥${settleAmount.toFixed(2)}！` }, corsHeaders);
+      }
+
+      // 路由 5.7: 合伙人申请/生成专属推广分销链接
+      if (path === "/api/affiliate/register" && request.method === "POST") {
+        const body = await request.json();
+        let code = (body.code || "").trim().toLowerCase();
+        const name = (body.name || "").trim() || code;
+        const contact = (body.contact || "").trim();
+        const prices = body.prices || {};
+
+        if (!code || !/^[a-zA-Z0-9_\-]{2,16}$/.test(code)) {
+          return jsonResponse({ code: -1, msg: "推广代号必须为 2-16 位字母、数字或连字符 (例如 vip888, agent01)" }, corsHeaders);
+        }
+
+        let floorPrices = {};
+        try {
+          const fRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'FLOOR_PRICES'").first();
+          if (fRow && fRow.value) floorPrices = JSON.parse(fRow.value);
+        } catch(e) {}
+
+        const cleanPrices = {};
+        for (const [cat, pVal] of Object.entries(prices)) {
+          const ck = cleanCategoryName(cat);
+          const numPrice = parseFloat(pVal);
+          if (ck && !isNaN(numPrice) && numPrice > 0) {
+            const floorVal = parseFloat(floorPrices[ck] || "0");
+            if (floorVal > 0 && numPrice < floorVal) {
+              return jsonResponse({ code: -1, msg: `【${ck}】自定义价格 ￥${numPrice.toFixed(2)} 不能低于站长设定的最低供货底价 ￥${floorVal.toFixed(2)}！` }, corsHeaders);
+            }
+            cleanPrices[ck] = numPrice.toFixed(2);
+          }
+        }
+
+        const existing = await env.DB.prepare("SELECT * FROM affiliates WHERE code = ?").bind(code).first();
+        if (existing) {
+          if (existing.contact && contact && existing.contact !== contact) {
+            return jsonResponse({ code: -1, msg: "该推广代号已被其他合伙人使用，请更换一个专属代号！" }, corsHeaders);
+          }
+          await env.DB.prepare(`
+            UPDATE affiliates 
+            SET name = ?, contact = ?, price_config = ? 
+            WHERE code = ?
+          `).bind(name, contact || existing.contact, JSON.stringify(cleanPrices), code).run();
+        } else {
+          await env.DB.prepare(`
+            INSERT INTO affiliates (code, name, contact, price_config, total_sales, total_profit, settled_profit, order_count, status, created_at)
+            VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1, datetime('now', '+8 hours'))
+          `).bind(code, name, contact, JSON.stringify(cleanPrices)).run();
+        }
+
+        const affUrl = `${url.origin}/?aff=${code}`;
+        return jsonResponse({
+          code: 0,
+          msg: "🎉 合伙人分销专属链接配置成功！",
+          data: {
+            code: code,
+            name: name,
+            aff_url: affUrl,
+            prices: cleanPrices
+          }
+        }, corsHeaders);
+      }
+
+      // 路由 5.8: 合伙人查询推广业绩与待结收益
+      if (path === "/api/affiliate/info") {
+        const code = (url.searchParams.get("code") || "").trim().toLowerCase();
+        if (!code) return jsonResponse({ code: -1, msg: "请输入合伙人推广代号" }, corsHeaders);
+
+        const aff = await env.DB.prepare("SELECT * FROM affiliates WHERE code = ?").bind(code).first();
+        if (!aff) return jsonResponse({ code: -1, msg: "未找到该合伙人代号记录" }, corsHeaders);
+
+        let floorPrices = {};
+        try {
+          const fRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'FLOOR_PRICES'").first();
+          if (fRow && fRow.value) floorPrices = JSON.parse(fRow.value);
+        } catch(e) {}
+
+        const recentOrders = await env.DB.prepare(`
+          SELECT order_no, region, price, cost_price, affiliate_profit, status, created_at, paid_at
+          FROM orders
+          WHERE affiliate_code = ?
+          ORDER BY id DESC LIMIT 20
+        `).bind(code).all();
+
+        return jsonResponse({
+          code: 0,
+          data: {
+            code: aff.code,
+            name: aff.name,
+            contact: aff.contact,
+            price_config: JSON.parse(aff.price_config || "{}"),
+            total_sales: (aff.total_sales || 0).toFixed(2),
+            total_profit: (aff.total_profit || 0).toFixed(2),
+            settled_profit: (aff.settled_profit || 0).toFixed(2),
+            unsettled_profit: Math.max(0, (aff.total_profit || 0) - (aff.settled_profit || 0)).toFixed(2),
+            order_count: aff.order_count || 0,
+            recent_orders: recentOrders.results || []
+          },
+          floor_prices: floorPrices
         }, corsHeaders);
       }
 
@@ -1461,6 +1868,15 @@ async function ensureDbMigrated(env) {
     await env.DB.prepare("ALTER TABLE orders ADD COLUMN email_sent INTEGER DEFAULT 0").run();
   } catch (e) {}
   try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN affiliate_code TEXT DEFAULT ''").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN cost_price REAL DEFAULT 0").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("ALTER TABLE orders ADD COLUMN affiliate_profit REAL DEFAULT 0").run();
+  } catch (e) {}
+  try {
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS coupons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1470,6 +1886,23 @@ async function ensureDbMigrated(env) {
         min_amount REAL DEFAULT 0,
         max_uses INTEGER DEFAULT -1,
         used_count INTEGER DEFAULT 0,
+        status INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS affiliates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE NOT NULL,
+        name TEXT DEFAULT '',
+        contact TEXT DEFAULT '',
+        price_config TEXT DEFAULT '{}',
+        total_sales REAL DEFAULT 0,
+        total_profit REAL DEFAULT 0,
+        settled_profit REAL DEFAULT 0,
+        order_count INTEGER DEFAULT 0,
         status INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -1486,6 +1919,9 @@ async function ensureDbMigrated(env) {
   } catch (e) {}
   try {
     await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_carmis_account ON carmis(account)").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_affiliates_code ON affiliates(code)").run();
   } catch (e) {}
 }
 
@@ -2107,7 +2543,11 @@ function getFrontendHTML(env) {
         <span class="hidden sm:inline text-slate-500">|</span>
         <span class="hidden sm:inline text-[11px] text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30">24H 现货秒发</span>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 sm:gap-2">
+        <button onclick="openAffiliateModal()" class="px-2.5 py-1.5 bg-gradient-to-r from-purple-600/80 to-indigo-600/80 hover:from-purple-500 hover:to-indigo-500 text-purple-200 hover:text-white font-bold rounded-xl text-xs border border-purple-500/40 transition flex items-center gap-1 shadow">
+          <i class="fa-solid fa-handshake text-purple-300 text-[10px]"></i>
+          <span>合伙人分销</span>
+        </button>
         <button onclick="switchTab('query')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs border border-slate-700 transition flex items-center gap-1">
           <i class="fa-solid fa-magnifying-glass text-indigo-400 text-[10px]"></i>
           <span>查单找回</span>
@@ -2137,6 +2577,17 @@ function getFrontendHTML(env) {
         <i class="fa-solid fa-bullhorn animate-bounce"></i>
       </div>
       <span id="site-announcement-text" class="flex-1 font-semibold leading-relaxed"></span>
+    </div>
+
+    <!-- 🤝 合伙人专属通道提示条 (若从分销链接访问则展示) -->
+    <div id="affiliate-welcome-bar" class="hidden mb-3 p-3 rounded-xl bg-gradient-to-r from-purple-500/20 via-indigo-500/20 to-purple-500/20 border border-purple-500/40 text-purple-200 text-xs flex items-center justify-between shadow-xl backdrop-blur-md">
+      <div class="flex items-center gap-2">
+        <div class="w-6 h-6 rounded-lg bg-purple-500/30 text-purple-300 flex items-center justify-center shrink-0 text-xs">
+          <i class="fa-solid fa-handshake animate-pulse"></i>
+        </div>
+        <span>您正在通过合伙人 <b id="affiliate-welcome-name" class="font-bold text-white">--</b> 的专属通道访问，享受优质直发与质保服务！</span>
+      </div>
+      <span class="text-[10px] px-2 py-0.5 rounded bg-purple-500/30 text-purple-200 shrink-0 font-medium border border-purple-400/30">官方特约</span>
     </div>
 
     <!-- 🛒 核心商品与在线下单面板 (置顶首屏，方便立即选购) -->
@@ -2502,7 +2953,7 @@ function getFrontendHTML(env) {
 
         <!-- 标题与分享 -->
         <div class="text-center pt-1">
-          <h2 id="co-product-title" class="text-xl sm:text-2xl font-black text-white tracking-tight">租号下载小火箭</h2>
+          <h2 id="co-product-title" class="text-lg sm:text-xl font-black text-white tracking-tight break-words px-8 leading-snug">租号下载小火箭</h2>
           <div class="mt-1">
             <a href="javascript:void(0)" onclick="shareCurrentProduct()" class="text-indigo-400 hover:text-indigo-300 text-xs inline-flex items-center gap-1 font-medium transition">
               <i class="fa-solid fa-share-nodes"></i> 将宝贝分享给好友
@@ -2850,6 +3301,117 @@ function getFrontendHTML(env) {
         <button onclick="closeSupportModal()" class="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium transition">
           关闭
         </button>
+      </div>
+    </div>
+
+    <!-- 弹窗 4：合伙人分销申请与业绩对账查询 -->
+    <div id="modal-affiliate" class="fixed inset-0 bg-black/85 backdrop-blur-md hidden z-50 p-4 overflow-y-auto" style="display: none; align-items: center; justify-content: center;">
+      <div class="glass max-w-lg w-full rounded-2xl p-5 sm:p-6 shadow-2xl space-y-4 border border-purple-500/40 my-auto text-slate-200">
+        <div class="flex items-center justify-between border-b border-slate-700 pb-3">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-handshake text-purple-400"></i> 合伙人分销中心 (零门槛自动分成)
+          </h3>
+          <button onclick="closeAffiliateModal()" class="text-slate-400 hover:text-white text-lg">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+
+        <!-- 模式切换 Tabs -->
+        <div class="grid grid-cols-2 gap-2 p-1 bg-slate-950 rounded-xl border border-slate-800 text-xs font-bold text-center">
+          <button id="aff-tab-join" onclick="switchAffTab('join')" class="py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow">
+            <i class="fa-solid fa-link mr-1"></i> 生成推广链接
+          </button>
+          <button id="aff-tab-query" onclick="switchAffTab('query')" class="py-2 rounded-lg text-slate-400 hover:text-white transition">
+            <i class="fa-solid fa-chart-pie mr-1"></i> 佣金收益对账
+          </button>
+        </div>
+
+        <!-- Tab 1: 申请/配置我的分销链接 -->
+        <div id="aff-panel-join" class="space-y-3 text-xs">
+          <div class="p-3 bg-purple-950/40 border border-purple-500/30 rounded-xl space-y-1 text-purple-200">
+            <div class="font-bold flex items-center gap-1.5"><i class="fa-solid fa-wand-magic-sparkles text-amber-300"></i> 分销规则与说明：</div>
+            <p class="text-[11px] text-slate-300 leading-relaxed">
+              1. 填写专属代号即可一键生成专属分销链接，无需实名零门槛；<br>
+              2. 商品售价由您自己定（不能低于站长设定的最低供货底价）；<br>
+              3. 买家通过您的链接下单后，差价利润自动计入您的代号账户！
+            </p>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div>
+              <label class="block text-slate-300 font-medium mb-1">专属推广代号 (字母/数字) <span class="text-rose-400">*</span></label>
+              <input type="text" id="aff-code-input" placeholder="如 vip888, jack" class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono lowercase">
+            </div>
+            <div>
+              <label class="block text-slate-300 font-medium mb-1">您的昵称 / 联系方式 (微信/QQ)</label>
+              <input type="text" id="aff-contact-input" placeholder="如 微信: abc888" class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white">
+            </div>
+          </div>
+
+          <!-- 各品类自定义售价表 -->
+          <div class="space-y-1.5 pt-1">
+            <label class="block text-slate-300 font-bold flex items-center justify-between">
+              <span>自定义各商品零售售价：</span>
+              <span class="text-[10px] text-slate-400">留空则保持商城默认价</span>
+            </label>
+            <div id="aff-price-inputs-container" class="space-y-2 max-h-48 overflow-y-auto pr-1">
+              <!-- 由 JS 动态填充各个品类的自定义价格输入框 -->
+            </div>
+          </div>
+
+          <button onclick="submitAffiliateRegister()" id="btn-submit-aff-reg" class="w-full py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center gap-1.5 text-xs">
+            <i class="fa-solid fa-bolt"></i> 一键生成我的专属推广链接
+          </button>
+
+          <!-- 链接生成成功提示卡片 -->
+          <div id="aff-result-card" class="hidden p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-xl space-y-2">
+            <div class="text-emerald-300 font-bold flex items-center gap-1.5">
+              <i class="fa-solid fa-circle-check"></i> 专属推广链接已生成！
+            </div>
+            <div class="p-2 bg-slate-950 rounded-lg border border-slate-800 text-[11px] font-mono text-white break-all select-all" id="aff-result-url"></div>
+            <button onclick="copySingleField('aff-result-url', '推广链接已复制到剪贴板！')" class="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs transition">
+              一键复制专属分销链接
+            </button>
+          </div>
+        </div>
+
+        <!-- Tab 2: 收益对账查询 -->
+        <div id="aff-panel-query" class="space-y-3 text-xs hidden">
+          <div class="flex gap-2">
+            <input type="text" id="aff-query-code-input" placeholder="输入您的合伙人代号 (如 vip888)" class="flex-1 px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono lowercase">
+            <button onclick="queryAffiliateStats()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition shrink-0">
+              查询对账
+            </button>
+          </div>
+
+          <!-- 收益数据汇总 -->
+          <div id="aff-stats-box" class="space-y-3 hidden">
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div class="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <div class="text-[10px] text-slate-400">累计成交</div>
+                <div class="text-sm font-bold text-white font-mono mt-0.5" id="aff-stat-orders">0 笔</div>
+              </div>
+              <div class="p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-center">
+                <div class="text-[10px] text-slate-400">累计业绩</div>
+                <div class="text-sm font-bold text-indigo-400 font-mono mt-0.5" id="aff-stat-sales">￥0.00</div>
+              </div>
+              <div class="p-2.5 bg-slate-950 rounded-xl border border-emerald-500/30 text-center">
+                <div class="text-[10px] text-emerald-400">总赚取佣金</div>
+                <div class="text-sm font-bold text-emerald-400 font-mono mt-0.5" id="aff-stat-profit">￥0.00</div>
+              </div>
+              <div class="p-2.5 bg-slate-950 rounded-xl border border-amber-500/30 text-center">
+                <div class="text-[10px] text-amber-400">待结算佣金</div>
+                <div class="text-sm font-bold text-amber-300 font-mono mt-0.5" id="aff-stat-unsettled">￥0.00</div>
+              </div>
+            </div>
+
+            <!-- 名下订单列表 -->
+            <div class="space-y-1.5">
+              <div class="text-slate-400 font-medium">近 20 笔推广订单明细：</div>
+              <div id="aff-orders-list" class="space-y-1.5 max-h-48 overflow-y-auto pr-1"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -3313,7 +3875,8 @@ function getFrontendHTML(env) {
             contact: email,
             quantity: qty,
             coupon_code: couponCode,
-            pay_method: payMethod
+            pay_method: payMethod,
+            affiliate_code: sessionStorage.getItem("faka_aff") || ""
           })
         });
         var data = await res.json();
@@ -3405,15 +3968,40 @@ function getFrontendHTML(env) {
       }
     }
 
-    async function loadStats() {
+    function checkUrlAffCode() {
       try {
-        var res = await fetch("/api/stats?_t=" + Date.now());
+        var params = new URLSearchParams(window.location.search);
+        var aff = params.get("aff");
+        if (aff) {
+          sessionStorage.setItem("faka_aff", aff.toLowerCase().trim());
+        }
+      } catch(e) {}
+    }
+
+    async function loadStats() {
+      checkUrlAffCode();
+      var affParam = sessionStorage.getItem("faka_aff") || "";
+      var statsUrl = "/api/stats?_t=" + Date.now() + (affParam ? ("&aff=" + encodeURIComponent(affParam)) : "");
+
+      try {
+        var res = await fetch(statsUrl);
         var json = await res.json();
         if (json.code === 0 && json.data) {
           loadedRegions = json.data || [];
           globalDefaultPrice = json.price || "4.99";
           globalCategoryPrices = json.category_prices || {};
           globalCategoryImages = json.category_images || {};
+
+          // 若是通过分销链接访问，展示合伙人专属欢迎条
+          if (json.affiliate) {
+            var affBanner = document.getElementById("affiliate-welcome-bar");
+            if (affBanner) {
+              affBanner.classList.remove("hidden");
+              var affNameEl = document.getElementById("affiliate-welcome-name");
+              if (affNameEl) affNameEl.innerText = json.affiliate.name || json.affiliate.code;
+            }
+          }
+
           if (json.pay_qrcode) {
             var qrImg = document.getElementById("pay-qr-img");
             if (qrImg) qrImg.src = json.pay_qrcode;
@@ -3491,6 +4079,171 @@ function getFrontendHTML(env) {
         console.error("加载失败", e);
       }
       checkSavedRecentOrder();
+    }
+
+    function openAffiliateModal() {
+      var modal = document.getElementById("modal-affiliate");
+      if (modal) {
+        modal.classList.remove("hidden");
+        modal.style.display = "flex";
+      }
+      switchAffTab('join');
+      renderAffiliatePriceInputs();
+    }
+
+    function closeAffiliateModal() {
+      var modal = document.getElementById("modal-affiliate");
+      if (modal) {
+        modal.classList.add("hidden");
+        modal.style.display = "none";
+      }
+    }
+
+    function switchAffTab(tab) {
+      var btnJoin = document.getElementById("aff-tab-join");
+      var btnQuery = document.getElementById("aff-tab-query");
+      var panelJoin = document.getElementById("aff-panel-join");
+      var panelQuery = document.getElementById("aff-panel-query");
+
+      if (tab === 'join') {
+        if (btnJoin) btnJoin.className = "py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow";
+        if (btnQuery) btnQuery.className = "py-2 rounded-lg text-slate-400 hover:text-white transition";
+        if (panelJoin) panelJoin.classList.remove("hidden");
+        if (panelQuery) panelQuery.classList.add("hidden");
+      } else {
+        if (btnQuery) btnQuery.className = "py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow";
+        if (btnJoin) btnJoin.className = "py-2 rounded-lg text-slate-400 hover:text-white transition";
+        if (panelQuery) panelQuery.classList.remove("hidden");
+        if (panelJoin) panelJoin.classList.add("hidden");
+        var savedAff = sessionStorage.getItem("faka_aff") || "";
+        var qInp = document.getElementById("aff-query-code-input");
+        if (qInp && !qInp.value && savedAff) {
+          qInp.value = savedAff;
+          queryAffiliateStats();
+        }
+      }
+    }
+
+    function renderAffiliatePriceInputs() {
+      var box = document.getElementById("aff-price-inputs-container");
+      if (!box || !loadedRegions || loadedRegions.length === 0) return;
+
+      box.innerHTML = loadedRegions.map(function(r) {
+        var cat = (r && r.region) ? String(r.region).trim() : "美国";
+        var safeCat = cat.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        var curPrice = (globalCategoryPrices && globalCategoryPrices[cat]) || globalDefaultPrice || "4.99";
+
+        return '<div class="flex items-center justify-between p-2 rounded-xl bg-slate-900 border border-slate-800">' +
+          '<div class="min-w-0 flex-1 mr-2">' +
+            '<div class="font-bold text-white text-xs truncate">' + safeCat + '</div>' +
+            '<div class="text-[10px] text-slate-500">商城默认: ￥' + curPrice + '</div>' +
+          '</div>' +
+          '<div class="relative w-28 shrink-0">' +
+            '<span class="absolute left-2.5 top-1.5 text-slate-500 text-xs">￥</span>' +
+            '<input type="number" step="0.01" data-cat="' + encodeURIComponent(cat) + '" placeholder="' + curPrice + '" class="aff-custom-price-input w-full pl-6 pr-2 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-purple-500">' +
+          '</div>' +
+        '</div>';
+      }).join("");
+    }
+
+    async function submitAffiliateRegister() {
+      var codeInp = document.getElementById("aff-code-input");
+      var contactInp = document.getElementById("aff-contact-input");
+      var code = (codeInp ? codeInp.value.trim().toLowerCase() : "");
+      var contact = (contactInp ? contactInp.value.trim() : "");
+
+      if (!code) return alert("请填写您的专属推广代号 (例如: vip888, jack)！");
+      if (!/^[a-zA-Z0-9_\-]{2,16}$/.test(code)) {
+        return alert("推广代号仅限 2-16 位字母、数字或横杠组合！");
+      }
+
+      var prices = {};
+      var inputs = document.querySelectorAll(".aff-custom-price-input");
+      inputs.forEach(function(inp) {
+        var cat = decodeURIComponent(inp.dataset.cat || "");
+        var val = inp.value.trim();
+        if (cat && val && parseFloat(val) > 0) {
+          prices[cat] = parseFloat(val).toFixed(2);
+        }
+      });
+
+      var btn = document.getElementById("btn-submit-aff-reg");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 生成中...';
+      }
+
+      try {
+        var res = await fetch("/api/affiliate/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: code, contact: contact, prices: prices })
+        });
+        var json = await res.json();
+        if (json.code === 0 && json.data) {
+          sessionStorage.setItem("faka_aff", code);
+          var resCard = document.getElementById("aff-result-card");
+          var resUrl = document.getElementById("aff-result-url");
+          if (resUrl) resUrl.innerText = json.data.aff_url;
+          if (resCard) resCard.classList.remove("hidden");
+          showToast("🎉 分销专属链接生成成功！");
+        } else {
+          alert(json.msg || "生成失败");
+        }
+      } catch(e) {
+        alert("网络请求失败");
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-bolt"></i> 一键生成我的专属推广链接';
+        }
+      }
+    }
+
+    async function queryAffiliateStats() {
+      var codeInp = document.getElementById("aff-query-code-input");
+      var code = (codeInp ? codeInp.value.trim().toLowerCase() : "");
+      if (!code) return alert("请输入推广代号！");
+
+      var statsBox = document.getElementById("aff-stats-box");
+      try {
+        var res = await fetch("/api/affiliate/info?code=" + encodeURIComponent(code));
+        var json = await res.json();
+        if (json.code === 0 && json.data) {
+          var d = json.data;
+          document.getElementById("aff-stat-orders").innerText = (d.order_count || 0) + " 笔";
+          document.getElementById("aff-stat-sales").innerText = "￥" + (d.total_sales || "0.00");
+          document.getElementById("aff-stat-profit").innerText = "￥" + (d.total_profit || "0.00");
+          document.getElementById("aff-stat-unsettled").innerText = "￥" + (d.unsettled_profit || "0.00");
+
+          var listEl = document.getElementById("aff-orders-list");
+          if (listEl) {
+            if (!d.recent_orders || d.recent_orders.length === 0) {
+              listEl.innerHTML = '<div class="text-slate-500 text-center py-3">暂无名下成交订单，快去分享您的链接吧！</div>';
+            } else {
+              listEl.innerHTML = d.recent_orders.map(function(o) {
+                var profit = (typeof o.affiliate_profit === 'number' ? o.affiliate_profit : (parseFloat(o.price || 0) - parseFloat(o.cost_price || 0))).toFixed(2);
+                return '<div class="p-2 rounded-lg bg-slate-950 border border-slate-800 flex justify-between items-center text-[11px]">' +
+                  '<div>' +
+                    '<div class="font-mono text-white font-bold">' + o.order_no + ' (' + o.region + ')</div>' +
+                    '<div class="text-slate-500 text-[10px]">' + o.created_at + '</div>' +
+                  '</div>' +
+                  '<div class="text-right">' +
+                    '<div class="text-emerald-400 font-bold font-mono">+￥' + profit + '</div>' +
+                    '<div class="text-[10px] ' + (o.status === 1 ? 'text-emerald-400' : 'text-amber-400') + '">' + (o.status === 1 ? '已出卡' : '待站长发货') + '</div>' +
+                  '</div>' +
+                '</div>';
+              }).join("");
+            }
+          }
+          if (statsBox) statsBox.classList.remove("hidden");
+        } else {
+          alert(json.msg || "未查询到记录");
+          if (statsBox) statsBox.classList.add("hidden");
+        }
+      } catch(e) {
+        alert("查询失败");
+      }
     }
 
     function checkUrlBuyParam() {
@@ -3713,9 +4466,9 @@ function getFrontendHTML(env) {
 
         card.innerHTML = imgHtml + 
           '<div class="flex-1 min-w-0 space-y-1">' +
-            '<div class="flex items-center justify-between gap-1">' +
-              '<span class="font-bold text-xs sm:text-sm text-white truncate">' + safeRegName + '</span>' +
-              getRegionMarketingTag(regName, idx) +
+            '<div class="flex items-start justify-between gap-1.5">' +
+              '<span class="font-bold text-xs sm:text-sm text-white break-words line-clamp-2 leading-tight flex-1" title="' + safeRegName + '">' + safeRegName + '</span>' +
+              '<div class="shrink-0 pt-0.5">' + getRegionMarketingTag(regName, idx) + '</div>' +
             '</div>' +
             '<div class="flex items-center justify-between text-[11px] text-slate-400">' +
               '<span class="flex items-center gap-1 text-amber-400/90 text-[10px]">' +
@@ -4088,6 +4841,51 @@ function getAdminHTML(env) {
     </div>
   </div>
 
+  <!-- 📋 库存明细查看与单张卡密删除弹窗 -->
+  <div id="modal-stock-detail" class="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4 hidden">
+    <div class="max-w-lg w-full bg-slate-900 border border-indigo-500/30 rounded-2xl p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-sm font-bold">
+            <i class="fa-solid fa-boxes-stacked"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-1.5" id="stock-detail-title">
+              库存明细
+            </h3>
+            <p class="text-[11px] text-slate-400" id="stock-detail-subtitle">在库可用: 0 | 已售出: 0</p>
+          </div>
+        </div>
+        <button type="button" onclick="closeStockDetailModal()" class="text-slate-400 hover:text-white p-1 rounded-lg">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+
+      <!-- 状态筛选 -->
+      <div class="flex items-center justify-between gap-2 text-xs">
+        <div class="flex gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          <button onclick="loadStockDetailCarmis('0')" id="stock-filter-0" class="px-3 py-1 rounded-lg bg-emerald-600 text-white font-bold transition">在库可用</button>
+          <button onclick="loadStockDetailCarmis('1')" id="stock-filter-1" class="px-3 py-1 rounded-lg text-slate-400 hover:text-white transition">已售出</button>
+          <button onclick="loadStockDetailCarmis('')" id="stock-filter-all" class="px-3 py-1 rounded-lg text-slate-400 hover:text-white transition">全部记录</button>
+        </div>
+        <button onclick="reloadStockDetail()" class="text-indigo-400 hover:text-indigo-300 text-xs flex items-center gap-1">
+          <i class="fa-solid fa-rotate-right"></i> 刷新
+        </button>
+      </div>
+
+      <!-- 卡密列表容器 -->
+      <div id="stock-carmis-container" class="space-y-2 max-h-72 overflow-y-auto pr-1 text-xs">
+        <div class="text-slate-500 text-center py-6">正在加载库存卡密明细...</div>
+      </div>
+
+      <div class="flex justify-end pt-2 border-t border-slate-800">
+        <button type="button" onclick="closeStockDetailModal()" class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs transition">
+          关闭
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- 顶部导航栏 -->
   <div class="mb-4 flex justify-between items-center border-b border-slate-800 pb-3">
     <h1 class="text-lg font-bold flex items-center gap-2 text-indigo-400">
@@ -4110,6 +4908,45 @@ function getAdminHTML(env) {
   </div>
 
   <div class="space-y-4">
+    <!-- 📊 今日经营与核心数据仪表盘 -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+      <div class="p-3 rounded-2xl bg-gradient-to-br from-emerald-950/60 to-slate-900 border border-emerald-500/40 shadow-lg space-y-1">
+        <div class="flex items-center justify-between text-slate-400 text-xs">
+          <span class="font-medium">今日实收营收</span>
+          <i class="fa-solid fa-coins text-emerald-400"></i>
+        </div>
+        <div class="text-lg sm:text-xl font-extrabold text-emerald-400 font-mono" id="stat-dash-today-rev">￥0.00</div>
+        <div class="text-[10px] text-slate-500">今日已到账总额</div>
+      </div>
+      <div class="p-3 rounded-2xl bg-gradient-to-br from-sky-950/60 to-slate-900 border border-sky-500/40 shadow-lg space-y-1">
+        <div class="flex items-center justify-between text-slate-400 text-xs">
+          <span class="font-medium">今日成交单数</span>
+          <i class="fa-solid fa-cart-shopping text-sky-400"></i>
+        </div>
+        <div class="text-lg sm:text-xl font-extrabold text-sky-400 font-mono" id="stat-dash-today-orders">0 笔</div>
+        <div class="text-[10px] text-slate-500">今日出卡成交数</div>
+      </div>
+      <div class="p-3 rounded-2xl bg-gradient-to-br from-amber-950/60 to-slate-900 border border-amber-500/40 shadow-lg space-y-1">
+        <div class="flex items-center justify-between text-slate-400 text-xs">
+          <span class="font-medium">待核销发货</span>
+          <i class="fa-solid fa-clock text-amber-400"></i>
+        </div>
+        <div class="text-lg sm:text-xl font-extrabold text-amber-300 font-mono flex items-center gap-1.5" id="stat-dash-pending">
+          <span id="stat-dash-pending-val">0</span>
+          <span id="stat-pending-dot" class="w-2 h-2 rounded-full bg-rose-500 hidden animate-ping"></span>
+        </div>
+        <div class="text-[10px] text-slate-500">买家已付待核销</div>
+      </div>
+      <div class="p-3 rounded-2xl bg-gradient-to-br from-indigo-950/60 to-slate-900 border border-indigo-500/40 shadow-lg space-y-1">
+        <div class="flex items-center justify-between text-slate-400 text-xs">
+          <span class="font-medium">累计总营业额</span>
+          <i class="fa-solid fa-chart-line text-indigo-400"></i>
+        </div>
+        <div class="text-lg sm:text-xl font-extrabold text-white font-mono" id="stat-dash-total-rev">￥0.00</div>
+        <div class="text-[10px] text-slate-500">历史累计收款流水</div>
+      </div>
+    </div>
+
     <!-- 管理秘钥与自动刷新控制 -->
     <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row gap-2 justify-between items-center">
       <div class="flex gap-2 w-full sm:w-auto flex-1">
@@ -4136,6 +4973,15 @@ function getAdminHTML(env) {
         </button>
       </div>
 
+      <!-- 🔍 快速搜索与即时筛选栏 -->
+      <div class="relative">
+        <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-500 text-xs"></i>
+        <input type="text" id="admin-order-search" oninput="filterAdminOrders(this.value)" placeholder="🔍 快速过滤单号 / 买家联系方式 / 品类 / 付款备注..." class="w-full pl-8 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+        <button type="button" onclick="clearAdminSearch()" id="btn-clear-search" class="absolute right-2.5 top-2 text-slate-500 hover:text-slate-300 hidden text-xs">
+          <i class="fa-solid fa-circle-xmark"></i>
+        </button>
+      </div>
+
       <!-- 三大分类 Tabs -->
       <div class="grid grid-cols-3 gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800 text-xs font-bold text-center">
         <button id="order-tab-paid" onclick="switchOrderTab('paid')" class="py-2 rounded-lg bg-emerald-600 text-white flex items-center justify-center gap-1.5 shadow transition">
@@ -4152,6 +4998,17 @@ function getAdminHTML(env) {
           <i class="fa-solid fa-circle-check"></i> 
           <span>已成交发卡</span>
           <span id="badge-done-count" class="px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-400 text-[10px]">0</span>
+        </button>
+      </div>
+
+      <!-- ⚡ 高峰期一键批量出卡发货条 -->
+      <div id="batch-approve-bar" class="hidden p-2.5 bg-emerald-950/50 border border-emerald-500/40 rounded-xl flex items-center justify-between text-xs">
+        <span class="text-emerald-300 font-medium flex items-center gap-1.5">
+          <i class="fa-solid fa-bolt animate-bounce text-emerald-400"></i>
+          <span>待核销: <b id="batch-pending-count" class="font-mono text-white text-sm">0</b> 单</span>
+        </span>
+        <button onclick="batchApprovePaidOrders()" id="btn-batch-approve" class="px-3.5 py-1.5 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-lg text-xs shadow-md transition flex items-center gap-1 transform active:scale-95">
+          <i class="fa-solid fa-bolt-lightning"></i> ⚡ 一键全部出卡发货
         </button>
       </div>
 
@@ -4503,6 +5360,49 @@ function getAdminHTML(env) {
         <textarea id="import-text" rows="2" placeholder="一行一条卡密，例如：&#10;账号: xxx@outlook.com ---- 密码: xxx" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-white"></textarea>
       </div>
     </div>
+
+    <!-- 🤝 分销合伙人管理与供货底价设置 (零门槛加盟 · 自动分成) -->
+    <div class="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+        <h2 class="font-bold text-amber-400 flex items-center gap-2 text-sm">
+          <i class="fa-solid fa-handshake-angle"></i> 分销合伙人管理与供货底价设置
+        </h2>
+        <span class="text-[11px] text-slate-400">零门槛推广 · 超出底价自动归合伙人</span>
+      </div>
+
+      <!-- 供货底价设置说明与表单 -->
+      <div class="p-3 bg-slate-950/70 rounded-xl border border-amber-500/30 space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+            <i class="fa-solid fa-sliders text-amber-400"></i> 各品类分销供货底价设置 (成本底线)
+          </span>
+          <button onclick="saveFloorPrices()" class="px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow transition">
+            <i class="fa-solid fa-floppy-disk"></i> 保存供货底价
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-400 leading-relaxed">
+          💡 <b>分成原理</b>：合伙人在前台自由生成推广链接，其自定义零售价不得低于您在此设置的底价。当客户成交时：<code class="text-amber-300 font-mono">合伙人收益 = (分销单价 - 供货底价) × 数量</code>，底价部分 100% 归您所有，利润自动记入合伙人账户。
+        </p>
+        <div id="floor-price-inputs-container" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
+          <div class="text-xs text-slate-500 col-span-full py-2 text-center">加载底价设置中...</div>
+        </div>
+      </div>
+
+      <!-- 合伙人列表 -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+            <i class="fa-solid fa-users text-indigo-400"></i> 已注册分销合伙人列表
+          </span>
+          <span class="text-[11px] text-slate-400" id="affiliates-count-label">合伙人: 0 位</span>
+        </div>
+        <div id="affiliates-table-container" class="space-y-2">
+          <div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">
+            暂无分销合伙人记录
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -4708,6 +5608,456 @@ function getAdminHTML(env) {
       }
     }
 
+    var rawAdminOrders = { paid: [], unpaid: [], done: [] };
+    var currentSearchKeyword = "";
+    var currentFloorPrices = {};
+    var currentAffiliates = [];
+    var currentStockRegion = "";
+    var currentStockFilter = "0";
+
+    function renderDashboardStats(stats, pendingCount) {
+      var todayRevEl = document.getElementById("stat-dash-today-rev");
+      var todayOrdersEl = document.getElementById("stat-dash-today-orders");
+      var pendingValEl = document.getElementById("stat-dash-pending-val");
+      var pendingDotEl = document.getElementById("stat-pending-dot");
+      var totalRevEl = document.getElementById("stat-dash-total-rev");
+
+      if (stats) {
+        if (todayRevEl) todayRevEl.innerText = "￥" + (parseFloat(stats.today_revenue) || 0).toFixed(2);
+        if (todayOrdersEl) todayOrdersEl.innerText = (stats.today_orders || 0) + " 笔";
+        var pCount = (pendingCount !== undefined) ? pendingCount : (stats.pending_count || 0);
+        if (pendingValEl) pendingValEl.innerText = pCount;
+        if (pendingDotEl) {
+          if (pCount > 0) pendingDotEl.classList.remove("hidden");
+          else pendingDotEl.classList.add("hidden");
+        }
+        if (totalRevEl) totalRevEl.innerText = "￥" + (parseFloat(stats.total_revenue) || 0).toFixed(2);
+      }
+    }
+
+    function filterAdminOrders(kw) {
+      currentSearchKeyword = (kw || "").trim().toLowerCase();
+      var clearBtn = document.getElementById("btn-clear-search");
+      if (clearBtn) {
+        if (currentSearchKeyword) clearBtn.classList.remove("hidden");
+        else clearBtn.classList.add("hidden");
+      }
+      applyAdminOrderFilter();
+    }
+
+    function clearAdminSearch() {
+      var inp = document.getElementById("admin-order-search");
+      if (inp) inp.value = "";
+      filterAdminOrders("");
+    }
+
+    function applyAdminOrderFilter() {
+      if (!currentSearchKeyword) {
+        renderAdminOrdersList(rawAdminOrders.paid, rawAdminOrders.unpaid, rawAdminOrders.done);
+        return;
+      }
+      var kw = currentSearchKeyword;
+      function matchOrder(o) {
+        var no = (o.order_no || "").toLowerCase();
+        var c = (o.contact || "").toLowerCase();
+        var r = (o.region || "").toLowerCase();
+        var pt = (o.pay_type || "").toLowerCase();
+        var cm = (o.carmi || "").toLowerCase();
+        var aff = (o.affiliate_code || "").toLowerCase();
+        return no.indexOf(kw) !== -1 || c.indexOf(kw) !== -1 || r.indexOf(kw) !== -1 || pt.indexOf(kw) !== -1 || cm.indexOf(kw) !== -1 || aff.indexOf(kw) !== -1;
+      }
+      var fPaid = rawAdminOrders.paid.filter(matchOrder);
+      var fUnpaid = rawAdminOrders.unpaid.filter(matchOrder);
+      var fDone = rawAdminOrders.done.filter(matchOrder);
+      renderAdminOrdersList(fPaid, fUnpaid, fDone);
+    }
+
+    function renderAdminOrdersList(paidOrders, unpaidOrders, doneOrders) {
+      var panelPaid = document.getElementById("order-panel-paid");
+      var panelUnpaid = document.getElementById("order-panel-unpaid");
+      var panelDone = document.getElementById("order-panel-done");
+
+      // 1. 渲染【买家已付款待发货】面板
+      if (panelPaid) {
+        if (!paidOrders || paidOrders.length === 0) {
+          panelPaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-6 bg-slate-950/60 rounded-xl border border-slate-800">' +
+            '<i class="fa-solid fa-circle-check text-emerald-400 text-base mb-1 block"></i>' +
+            (currentSearchKeyword ? '未搜索到匹配的待发货订单' : '暂无待发货订单，所有买家付款均已处理出库！') +
+          '</div>';
+        } else {
+          panelPaid.innerHTML = paidOrders.map(function(o) {
+            var affBadge = o.affiliate_code ?
+              '<span class="px-2 py-0.5 bg-amber-500/20 text-amber-300 font-bold rounded border border-amber-500/40 text-[10px] flex items-center gap-1">' +
+                '<i class="fa-solid fa-handshake"></i> 合伙人: ' + o.affiliate_code +
+                (o.affiliate_profit ? ' (分成 ￥' + parseFloat(o.affiliate_profit).toFixed(2) + ')' : '') +
+              '</span>' : '';
+
+            return '<div class="p-3.5 rounded-xl bg-slate-800 border-2 border-emerald-500/80 space-y-2.5 shadow-xl">' +
+              '<div class="flex justify-between items-center text-xs flex-wrap gap-1">' +
+                '<span class="font-mono text-white font-bold flex items-center gap-1.5">' +
+                  '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>' +
+                  '单号: ' + o.order_no +
+                '</span>' +
+                '<div class="flex items-center gap-1.5">' +
+                  affBadge +
+                  '<span class="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-bold rounded border border-emerald-500/40">' + 
+                    o.region + ' · ￥' + o.price + 
+                  '</span>' +
+                '</div>' +
+              '</div>' +
+              '<div class="text-xs text-emerald-300 font-medium bg-slate-950 p-2.5 rounded-lg border border-slate-700 space-y-1">' +
+                '<div class="flex justify-between items-center">' +
+                  '<span class="font-bold text-amber-300"><i class="fa-solid fa-comment-dollar mr-1"></i> ' + (o.pay_type || '买家已扫码') + '</span>' +
+                  '<span class="text-slate-400 text-[11px]">' + (o.contact || '买家未填联系方式') + '</span>' +
+                '</div>' +
+              '</div>' +
+              '<div class="flex justify-between items-center pt-0.5">' +
+                '<span class="text-[11px] text-slate-400 font-mono">' + o.created_at + '</span>' +
+                '<div class="flex items-center gap-2">' +
+                  '<button data-no="' + o.order_no + '" onclick="rejectAdminOrder(this.dataset.no)" class="px-3 py-2 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 font-bold rounded-xl text-xs border border-slate-700 transition" title="买家未付款或付款异常时驳回订单">' +
+                    '<i class="fa-solid fa-ban"></i> 驳回' +
+                  '</button>' +
+                  '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-xl text-xs shadow-lg flex items-center gap-1.5 transition transform active:scale-95">' +
+                    '<i class="fa-solid fa-bolt"></i> 确认已收款，立即出卡' +
+                  '</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+          }).join("");
+        }
+      }
+
+      // 2. 渲染【仅下单未付款】面板
+      if (panelUnpaid) {
+        if (!unpaidOrders || unpaidOrders.length === 0) {
+          panelUnpaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">' +
+            (currentSearchKeyword ? '未搜索到匹配的未付款订单' : '暂无未付款订单') +
+          '</div>';
+        } else {
+          panelUnpaid.innerHTML = unpaidOrders.map(function(o) {
+            return '<div class="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-1.5 text-xs">' +
+              '<div class="flex justify-between items-center">' +
+                '<span class="font-mono text-slate-300">' + o.order_no + '</span>' +
+                '<span class="text-indigo-300 font-medium">' + o.region + ' · ￥' + o.price + '</span>' +
+              '</div>' +
+              '<div class="flex justify-between items-center text-slate-400 text-[11px] pt-1 border-t border-slate-700/40">' +
+                '<span>下单: ' + o.created_at + ' (' + (o.contact || '无联系') + ')' + (o.affiliate_code ? ' [合伙人: ' + o.affiliate_code + ']' : '') + '</span>' +
+                '<div class="flex items-center gap-1.5">' +
+                  '<button data-no="' + o.order_no + '" onclick="deleteAdminOrder(this.dataset.no)" class="px-2 py-1 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 rounded text-[11px] border border-slate-700 transition" title="删除该废单">' +
+                    '<i class="fa-solid fa-trash-can"></i>' +
+                  '</button>' +
+                  '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-2.5 py-1 bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white rounded text-[11px] font-medium transition">' +
+                    '直接出卡' +
+                  '</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+          }).join("");
+        }
+      }
+
+      // 3. 渲染【已成交出卡】面板
+      if (panelDone) {
+        if (!doneOrders || doneOrders.length === 0) {
+          panelDone.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">' +
+            (currentSearchKeyword ? '未搜索到匹配的已发卡记录' : '暂无已发卡记录') +
+          '</div>';
+        } else {
+          panelDone.innerHTML = doneOrders.map(function(o) {
+            var affBadge = o.affiliate_code ?
+              '<span class="px-1.5 py-0.5 bg-amber-500/20 text-amber-300 font-mono rounded text-[10px] border border-amber-500/30">合伙人: ' + o.affiliate_code + (o.affiliate_profit ? ' (分成 ￥' + parseFloat(o.affiliate_profit).toFixed(2) + ')' : '') + '</span>' : '';
+
+            return '<div class="p-3 rounded-xl bg-slate-800/80 text-xs border border-slate-700/80 space-y-2">' +
+              '<div class="flex justify-between items-center text-slate-400 flex-wrap gap-1">' +
+                '<div class="flex items-center gap-2">' +
+                  '<span class="font-mono font-bold text-white">' + o.order_no + ' (' + o.region + ')</span>' +
+                  affBadge +
+                '</div>' +
+                '<span class="text-emerald-400 font-mono text-[11px]">' + (o.paid_at || '') + '</span>' +
+              '</div>' +
+              '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-2 rounded-lg border border-slate-800">' + 
+                (o.carmi || '已核销发卡') + 
+              '</div>' +
+            '</div>';
+          }).join("");
+        }
+      }
+    }
+
+    async function batchApprovePaidOrders() {
+      var key = document.getElementById("admin-key").value.trim();
+      var count = rawAdminOrders.paid.length;
+      if (count === 0) return alert("当前没有待核销发货的订单！");
+      if (!confirm("⚡ 确定要一键全部核销并发货当前全部 " + count + " 笔买家已付款订单吗？\n系统将自动扣减库存并向所有买家屏幕完成自动出卡！")) return;
+
+      var btn = document.getElementById("btn-batch-approve");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 批量出卡中...';
+      }
+
+      try {
+        var res = await fetch("/api/admin/batch_approve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || "🎉 批量出卡发货完成！");
+          loadAdminData();
+        } else {
+          alert(json.msg || "批量发货失败");
+        }
+      } catch(e) {
+        alert("批量发货网络请求异常");
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-bolt-lightning"></i> ⚡ 一键全部出卡发货';
+        }
+      }
+    }
+
+    function openStockDetailModal(region) {
+      currentStockRegion = region;
+      var modal = document.getElementById("modal-stock-detail");
+      if (modal) modal.classList.remove("hidden");
+      var title = document.getElementById("stock-detail-title");
+      if (title) title.innerText = "【" + region + "】库存卡密明细";
+      loadStockDetailCarmis("0");
+    }
+
+    function closeStockDetailModal() {
+      var modal = document.getElementById("modal-stock-detail");
+      if (modal) modal.classList.add("hidden");
+    }
+
+    function reloadStockDetail() {
+      loadStockDetailCarmis(currentStockFilter);
+    }
+
+    async function loadStockDetailCarmis(status) {
+      currentStockFilter = (status === undefined) ? currentStockFilter : status;
+      var key = document.getElementById("admin-key").value.trim();
+      var container = document.getElementById("stock-carmis-container");
+      if (!container) return;
+
+      var btn0 = document.getElementById("stock-filter-0");
+      var btn1 = document.getElementById("stock-filter-1");
+      var btnAll = document.getElementById("stock-filter-all");
+      if (btn0) btn0.className = currentStockFilter === "0" ? "px-3 py-1 rounded-lg bg-emerald-600 text-white font-bold transition" : "px-3 py-1 rounded-lg text-slate-400 hover:text-white transition";
+      if (btn1) btn1.className = currentStockFilter === "1" ? "px-3 py-1 rounded-lg bg-indigo-600 text-white font-bold transition" : "px-3 py-1 rounded-lg text-slate-400 hover:text-white transition";
+      if (btnAll) btnAll.className = currentStockFilter === "" ? "px-3 py-1 rounded-lg bg-slate-700 text-white font-bold transition" : "px-3 py-1 rounded-lg text-slate-400 hover:text-white transition";
+
+      container.innerHTML = '<div class="text-slate-500 text-center py-6"><i class="fa-solid fa-spinner fa-spin"></i> 加载中...</div>';
+
+      try {
+        var url = "/api/admin/carmis_list?key=" + encodeURIComponent(key) + "&region=" + encodeURIComponent(currentStockRegion);
+        if (currentStockFilter !== "") url += "&status=" + currentStockFilter;
+        var res = await fetch(url);
+        var json = await res.json();
+        if (json.code === 0) {
+          var sub = document.getElementById("stock-detail-subtitle");
+          if (sub) sub.innerText = "在库可用: " + (json.stock_count || 0) + " 条 | 已售出出库: " + (json.sold_count || 0) + " 条";
+
+          var list = json.carmis || [];
+          if (list.length === 0) {
+            container.innerHTML = '<div class="text-slate-500 text-center py-8 bg-slate-950/60 rounded-xl border border-slate-800">暂无符合条件的卡密数据</div>';
+            return;
+          }
+
+          container.innerHTML = list.map(function(c) {
+            var isSold = Number(c.status) === 1;
+            var statusBadge = isSold ?
+              '<span class="px-2 py-0.5 rounded bg-slate-700 text-slate-300 text-[10px] shrink-0 font-medium">已售出</span>' :
+              '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] shrink-0 font-bold border border-emerald-500/40">在库可用</span>';
+            var safeCarmi = (c.carmi || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+            return '<div class="p-2.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">' +
+              '<div class="flex-1 min-w-0 space-y-1">' +
+                '<div class="flex items-center gap-2">' +
+                  statusBadge +
+                  '<span class="text-[11px] text-slate-400 font-mono">' + (c.created_at || '') + '</span>' +
+                '</div>' +
+                '<div class="font-mono text-slate-200 select-all break-all text-xs bg-slate-900 p-1.5 rounded border border-slate-800/80">' +
+                  safeCarmi +
+                '</div>' +
+              '</div>' +
+              '<button data-id="' + c.id + '" onclick="deleteSingleCarmi(this.dataset.id)" class="px-2.5 py-1.5 bg-rose-950/70 hover:bg-rose-900 text-rose-300 rounded-lg text-xs border border-rose-800/80 transition shrink-0 flex items-center gap-1" title="删除此条卡密">' +
+                '<i class="fa-solid fa-trash-can"></i>' +
+              '</button>' +
+            '</div>';
+          }).join("");
+        } else {
+          container.innerHTML = '<div class="text-rose-400 text-center py-4">' + (json.msg || "加载失败") + '</div>';
+        }
+      } catch(e) {
+        container.innerHTML = '<div class="text-rose-400 text-center py-4">网络异常，加载卡密失败</div>';
+      }
+    }
+
+    async function deleteSingleCarmi(id) {
+      var key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确定要永久删除此条卡密吗？")) return;
+
+      try {
+        var res = await fetch("/api/admin/delete_carmi", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, id: id })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          loadStockDetailCarmis();
+          loadAdminData();
+        } else {
+          alert(json.msg || "删除失败");
+        }
+      } catch(e) {
+        alert("删除请求失败");
+      }
+    }
+
+    function renderFloorPricesTable(categories, floorPrices) {
+      var container = document.getElementById("floor-price-inputs-container");
+      if (!container) return;
+      if (floorPrices && typeof floorPrices === "object") {
+        currentFloorPrices = floorPrices;
+      }
+      var cats = (categories && Array.isArray(categories)) ? categories.map(cleanCatStr).filter(Boolean) : currentCategories;
+      cats = Array.from(new Set(cats));
+
+      var html = cats.map(function(rawCat) {
+        var cat = cleanCatStr(rawCat);
+        var encodedCat = encodeURIComponent(cat);
+        var safeCat = cat.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        var fp = currentFloorPrices[cat] !== undefined ? currentFloorPrices[cat] : "";
+        var retailP = currentCategoryPrices[cat] || "";
+
+        return '<div class="p-2.5 bg-slate-900 rounded-xl border border-slate-800 space-y-1.5">' +
+          '<div class="flex items-center justify-between text-xs">' +
+            '<span class="font-bold text-white truncate" title="' + safeCat + '">' + safeCat + '</span>' +
+            (retailP ? '<span class="text-[10px] text-slate-400 font-mono">前台价: ￥' + retailP + '</span>' : '') +
+          '</div>' +
+          '<div class="flex items-center gap-1.5">' +
+            '<span class="text-[11px] text-amber-400 font-medium shrink-0">供货底价:</span>' +
+            '<div class="relative flex-1">' +
+              '<span class="absolute left-2 top-1 text-slate-500 text-xs">￥</span>' +
+              '<input type="number" step="0.01" data-cat="' + encodedCat + '" value="' + fp + '" placeholder="如 5.00" class="floor-price-input w-full pl-5 pr-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-xs text-amber-400 font-mono font-bold focus:border-amber-500 focus:outline-none">' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+
+      container.innerHTML = html;
+    }
+
+    async function saveFloorPrices() {
+      var key = document.getElementById("admin-key").value.trim();
+      var inputs = document.querySelectorAll(".floor-price-input");
+      var map = {};
+      inputs.forEach(function(inp) {
+        var cat = cleanCatStr(inp.dataset.cat || "");
+        var val = inp.value.trim();
+        if (cat && val && parseFloat(val) >= 0) {
+          map[cat] = parseFloat(val).toFixed(2);
+        }
+      });
+
+      try {
+        var res = await fetch("/api/admin/set_floor_prices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, floor_prices: map })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || "🎉 供货底价已成功保存并立即生效！");
+          currentFloorPrices = map;
+        } else {
+          alert(json.msg || "保存底价失败");
+        }
+      } catch(e) {
+        alert("保存底价网络请求失败");
+      }
+    }
+
+    function renderAffiliatesTable(affiliates) {
+      var container = document.getElementById("affiliates-table-container");
+      var countLabel = document.getElementById("affiliates-count-label");
+      if (!container) return;
+      currentAffiliates = affiliates || [];
+
+      if (countLabel) countLabel.innerText = "合伙人: " + currentAffiliates.length + " 位";
+
+      if (currentAffiliates.length === 0) {
+        container.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无分销合伙人记录</div>';
+        return;
+      }
+
+      var html = currentAffiliates.map(function(a) {
+        var totalProfit = parseFloat(a.total_profit || 0);
+        var settledProfit = parseFloat(a.settled_profit || 0);
+        var pendingProfit = Math.max(0, totalProfit - settledProfit);
+        var host = window.location.origin;
+        var affLink = host + "/?aff=" + encodeURIComponent(a.code);
+
+        return '<div class="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs space-y-2">' +
+          '<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">' +
+            '<div class="flex items-center gap-2">' +
+              '<span class="font-mono font-bold text-amber-300 text-sm px-2 py-0.5 bg-amber-500/10 rounded border border-amber-500/30">' + a.code + '</span>' +
+              '<span class="font-bold text-white">' + (a.name || '合伙人') + '</span>' +
+              (a.contact ? '<span class="text-slate-400 text-[11px]">(' + a.contact + ')</span>' : '') +
+            '</div>' +
+            '<div class="flex items-center gap-2">' +
+              '<button onclick="navigator.clipboard.writeText(\'' + affLink + '\'); alert(\'已复制合伙人专属链接！\');" class="px-2 py-0.5 bg-slate-900 hover:bg-slate-700 text-indigo-300 rounded text-[11px] border border-slate-700 flex items-center gap-1 transition">' +
+                '<i class="fa-solid fa-copy"></i> 复制专属链接' +
+              '</button>' +
+              (pendingProfit > 0 ? 
+                '<button data-code="' + a.code + '" data-pending="' + pendingProfit.toFixed(2) + '" onclick="settleAffiliateProfit(this.dataset.code, this.dataset.pending)" class="px-2.5 py-0.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded text-[11px] shadow transition flex items-center gap-1">' +
+                  '<i class="fa-solid fa-hand-holding-dollar"></i> 结算分成 ￥' + pendingProfit.toFixed(2) +
+                '</button>' : 
+                '<span class="text-slate-500 text-[11px]">无待结提成</span>') +
+            '</div>' +
+          '</div>' +
+          '<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-700/60 text-[11px]">' +
+            '<div><span class="text-slate-400">累计销售: </span><b class="text-white font-mono">￥' + parseFloat(a.total_sales || 0).toFixed(2) + '</b></div>' +
+            '<div><span class="text-slate-400">累计利润: </span><b class="text-emerald-400 font-mono">￥' + totalProfit.toFixed(2) + '</b></div>' +
+            '<div><span class="text-slate-400">已结提成: </span><b class="text-slate-300 font-mono">￥' + settledProfit.toFixed(2) + '</b></div>' +
+            '<div><span class="text-slate-400">成交单数: </span><b class="text-amber-300 font-mono">' + (a.order_count || 0) + ' 笔</b></div>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+
+      container.innerHTML = html;
+    }
+
+    async function settleAffiliateProfit(code, pendingAmount) {
+      var key = document.getElementById("admin-key").value.trim();
+      var amtStr = prompt("请输入为合伙人【" + code + "】结算的提成金额 (元)：\n当前待结算利润为: ￥" + pendingAmount, pendingAmount);
+      if (amtStr === null) return;
+      var amt = parseFloat(amtStr);
+      if (isNaN(amt) || amt <= 0) return alert("请输入有效结算金额");
+
+      try {
+        var res = await fetch("/api/admin/settle_affiliate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, code: code, amount: amt })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || "🎉 提成结算记录成功！");
+          loadAdminData();
+        } else {
+          alert(json.msg || "结算失败");
+        }
+      } catch(e) {
+        alert("结算网络请求失败");
+      }
+    }
+
     async function loadAdminData() {
       var keyInput = document.getElementById("admin-key");
       var key = (keyInput ? keyInput.value.trim() : "") || localStorage.getItem("faka_admin_key") || sessionStorage.getItem("faka_admin_key");
@@ -4817,6 +6167,9 @@ function getAdminHTML(env) {
 
           var doneOrders = json.recent || [];
 
+          // 缓存原始订单供快速检索
+          rawAdminOrders = { paid: paidOrders, unpaid: unpaidOrders, done: doneOrders };
+
           // 更新三大分类数量徽章
           if (badgePaid) {
             badgePaid.innerText = paidOrders.length;
@@ -4837,95 +6190,39 @@ function getAdminHTML(env) {
           }
           lastPendingCount = paidOrders.length;
 
-          // 1. 渲染【买家已付款待发货】面板
-          if (panelPaid) {
-            if (paidOrders.length === 0) {
-              panelPaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-6 bg-slate-950/60 rounded-xl border border-slate-800">' +
-                '<i class="fa-solid fa-circle-check text-emerald-400 text-base mb-1 block"></i>' +
-                '暂无待发货订单，所有买家付款均已处理出库！' +
-              '</div>';
+          // 更新今日经营统计仪表盘
+          renderDashboardStats(json.stats, paidOrders.length);
+
+          // 更新一键批量出卡发货条
+          var batchBar = document.getElementById("batch-approve-bar");
+          var batchCount = document.getElementById("batch-pending-count");
+          if (batchBar && batchCount) {
+            batchCount.innerText = paidOrders.length;
+            if (paidOrders.length > 0) {
+              batchBar.classList.remove("hidden");
             } else {
-              panelPaid.innerHTML = paidOrders.map(function(o) {
-                return '<div class="p-3.5 rounded-xl bg-slate-800 border-2 border-emerald-500/80 space-y-2.5 shadow-xl">' +
-                  '<div class="flex justify-between items-center text-xs">' +
-                    '<span class="font-mono text-white font-bold flex items-center gap-1.5">' +
-                      '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>' +
-                      '单号: ' + o.order_no +
-                    '</span>' +
-                    '<span class="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 font-bold rounded border border-emerald-500/40">' + 
-                      o.region + ' · ￥' + o.price + 
-                    '</span>' +
-                  '</div>' +
-                  '<div class="text-xs text-emerald-300 font-medium bg-slate-950 p-2.5 rounded-lg border border-slate-700 space-y-1">' +
-                    '<div class="flex justify-between items-center">' +
-                      '<span class="font-bold text-amber-300"><i class="fa-solid fa-comment-dollar mr-1"></i> ' + (o.pay_type || '买家已扫码') + '</span>' +
-                      '<span class="text-slate-400 text-[11px]">' + (o.contact || '买家未填联系方式') + '</span>' +
-                    '</div>' +
-                  '</div>' +
-                  '<div class="flex justify-between items-center pt-0.5">' +
-                    '<span class="text-[11px] text-slate-400 font-mono">' + o.created_at + '</span>' +
-                    '<div class="flex items-center gap-2">' +
-                      '<button data-no="' + o.order_no + '" onclick="rejectAdminOrder(this.dataset.no)" class="px-3 py-2 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 font-bold rounded-xl text-xs border border-slate-700 transition" title="买家未付款或付款异常时驳回订单">' +
-                        '<i class="fa-solid fa-ban"></i> 驳回' +
-                      '</button>' +
-                      '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-5 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-extrabold rounded-xl text-xs shadow-lg flex items-center gap-1.5 transition transform active:scale-95">' +
-                        '<i class="fa-solid fa-bolt"></i> 确认已收款，立即出卡' +
-                      '</button>' +
-                    '</div>' +
-                  '</div>' +
-                '</div>';
-              }).join("");
+              batchBar.classList.add("hidden");
             }
           }
 
-          // 2. 渲染【仅下单未付款】面板
-          if (panelUnpaid) {
-            if (unpaidOrders.length === 0) {
-              panelUnpaid.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无未付款订单</div>';
-            } else {
-              panelUnpaid.innerHTML = unpaidOrders.map(function(o) {
-                return '<div class="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-1.5 text-xs">' +
-                  '<div class="flex justify-between items-center">' +
-                    '<span class="font-mono text-slate-300">' + o.order_no + '</span>' +
-                    '<span class="text-indigo-300 font-medium">' + o.region + ' · ￥' + o.price + '</span>' +
-                  '</div>' +
-                  '<div class="flex justify-between items-center text-slate-400 text-[11px] pt-1 border-t border-slate-700/40">' +
-                    '<span>下单: ' + o.created_at + ' (' + (o.contact || '无联系') + ')</span>' +
-                    '<div class="flex items-center gap-1.5">' +
-                      '<button data-no="' + o.order_no + '" onclick="deleteAdminOrder(this.dataset.no)" class="px-2 py-1 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 rounded text-[11px] border border-slate-700 transition" title="删除该废单">' +
-                        '<i class="fa-solid fa-trash-can"></i>' +
-                      '</button>' +
-                      '<button data-no="' + o.order_no + '" onclick="approveOrder(this.dataset.no)" class="px-2.5 py-1 bg-slate-700 hover:bg-emerald-600 text-slate-200 hover:text-white rounded text-[11px] font-medium transition">' +
-                        '直接出卡' +
-                      '</button>' +
-                    '</div>' +
-                  '</div>' +
-                '</div>';
-              }).join("");
-            }
+          // 渲染供货底价与合伙人列表
+          if (json.floor_prices !== undefined || json.categories) {
+            renderFloorPricesTable(json.categories, json.floor_prices);
+          }
+          if (json.affiliates) {
+            renderAffiliatesTable(json.affiliates);
           }
 
-          // 3. 渲染【已成交出卡】面板
-          if (panelDone) {
-            if (doneOrders.length === 0) {
-              panelDone.innerHTML = '<div class="text-xs text-slate-500 text-center py-4 bg-slate-950/60 rounded-xl border border-slate-800">暂无已发卡记录</div>';
-            } else {
-              panelDone.innerHTML = doneOrders.map(function(o) {
-                return '<div class="p-3 rounded-xl bg-slate-800/80 text-xs border border-slate-700/80 space-y-2">' +
-                  '<div class="flex justify-between items-center text-slate-400">' +
-                    '<span class="font-mono font-bold text-white">' + o.order_no + ' (' + o.region + ')</span>' +
-                    '<span class="text-emerald-400 font-mono text-[11px]">' + (o.paid_at || '') + '</span>' +
-                  '</div>' +
-                  '<div class="text-slate-300 font-mono select-all break-all text-[11px] bg-slate-950 p-2 rounded-lg border border-slate-800">' + 
-                    (o.carmi || '已核销发卡') + 
-                  '</div>' +
-                '</div>';
-              }).join("");
-            }
-          }
-
+          // 渲染品类定价及封面
           if (json.categories || json.category_prices || json.category_images) {
             renderCategoryPriceTable(json.categories, json.category_prices, json.category_images);
+          }
+
+          // 渲染订单列表（支持即时关键词筛选）
+          if (currentSearchKeyword) {
+            applyAdminOrderFilter();
+          } else {
+            renderAdminOrdersList(paidOrders, unpaidOrders, doneOrders);
           }
         } else {
           if (adminPollTimer) clearInterval(adminPollTimer);
@@ -5032,8 +6329,11 @@ function getAdminHTML(env) {
             imgPreview +
             '<div class="flex-1 min-w-0 space-y-1.5">' +
               '<div class="flex items-center justify-between">' +
-                '<span class="text-xs font-bold text-white truncate flex items-center gap-1.5"><i class="fa-solid fa-tag text-indigo-400 text-[10px]"></i>' + safeDisplayCat + '</span>' +
-                '<div class="flex items-center gap-1.5">' +
+                '<span class="text-xs font-bold text-white break-words flex-1 flex items-center gap-1.5 mr-2" title="' + safeDisplayCat + '"><i class="fa-solid fa-tag text-indigo-400 text-[10px] shrink-0"></i><span class="break-words line-clamp-2 leading-tight">' + safeDisplayCat + '</span></span>' +
+                '<div class="flex items-center gap-1.5 shrink-0">' +
+                  '<button data-cat="' + encodedCat + '" onclick="openStockDetailModal(decodeURIComponent(this.dataset.cat))" class="px-2.5 py-1 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded text-[11px] flex items-center gap-1 shadow transition" title="查看并管理此品类的卡密库存">' +
+                    '<i class="fa-solid fa-boxes-stacked"></i> 库存' +
+                  '</button>' +
                   '<button data-cat="' + encodedCat + '" onclick="aiGenerateCategoryImage(decodeURIComponent(this.dataset.cat), this)" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 text-white font-bold rounded text-[11px] flex items-center gap-1 shadow transition" title="使用 AI 一键为该品类生成专属高清封面">' +
                     '<i class="fa-solid fa-wand-magic-sparkles"></i> AI生图' +
                   '</button>' +
