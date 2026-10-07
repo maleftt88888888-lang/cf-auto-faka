@@ -4746,6 +4746,7 @@ function getAdminHTML(env) {
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
   <style>
     body { background: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .hidden { display: none !important; }
     @keyframes pulse-ring {
       0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
       70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
@@ -5439,6 +5440,22 @@ function getAdminHTML(env) {
     var rawAdminOrders = { paid: [], unpaid: [], done: [] };
     var currentSearchKeyword = "";
 
+    function hideAdminLoginModal() {
+      var m = document.getElementById("admin-login-modal");
+      if (m) {
+        m.classList.add("hidden");
+        m.style.display = "none";
+      }
+    }
+
+    function showAdminLoginModal() {
+      var m = document.getElementById("admin-login-modal");
+      if (m) {
+        m.classList.remove("hidden");
+        m.style.display = "flex";
+      }
+    }
+
     function togglePasswordVisibility() {
       var inp = document.getElementById("gate-password-input");
       var icon = document.getElementById("eye-icon");
@@ -5484,7 +5501,7 @@ function getAdminHTML(env) {
           }
           var keyInput = document.getElementById("admin-key");
           if (keyInput) keyInput.value = key;
-          document.getElementById("admin-login-modal").classList.add("hidden");
+          hideAdminLoginModal();
           if (errMsg) errMsg.classList.add("hidden");
           try {
             await loadAdminData();
@@ -5522,7 +5539,7 @@ function getAdminHTML(env) {
       if (gateInput) gateInput.value = "";
       var errMsg = document.getElementById("gate-error-msg");
       if (errMsg) errMsg.classList.add("hidden");
-      document.getElementById("admin-login-modal").classList.remove("hidden");
+      showAdminLoginModal();
     }
 
     updateSoundBtnUI();
@@ -5813,7 +5830,7 @@ function getAdminHTML(env) {
       var key = document.getElementById("admin-key").value.trim();
       var count = rawAdminOrders.paid.length;
       if (count === 0) return alert("当前没有待核销发货的订单！");
-      if (!confirm("⚡ 确定要一键全部核销并发货当前全部 " + count + " 笔买家已付款订单吗？\n系统将自动扣减库存并向所有买家屏幕完成自动出卡！")) return;
+      if (!confirm("⚡ 确定要一键全部核销并发货当前全部 " + count + " 笔买家已付款订单吗？\\n系统将自动扣减库存并向所有买家屏幕完成自动出卡！")) return;
 
       var btn = document.getElementById("btn-batch-approve");
       if (btn) {
@@ -6042,7 +6059,7 @@ function getAdminHTML(env) {
               (a.contact ? '<span class="text-slate-400 text-[11px]">(' + a.contact + ')</span>' : '') +
             '</div>' +
             '<div class="flex items-center gap-2">' +
-              '<button onclick="navigator.clipboard.writeText(\'' + affLink + '\'); alert(\'已复制合伙人专属链接！\');" class="px-2 py-0.5 bg-slate-900 hover:bg-slate-700 text-indigo-300 rounded text-[11px] border border-slate-700 flex items-center gap-1 transition">' +
+              '<button data-link="' + affLink + '" onclick="copyAffiliateLink(this.dataset.link)" class="px-2 py-0.5 bg-slate-900 hover:bg-slate-700 text-indigo-300 rounded text-[11px] border border-slate-700 flex items-center gap-1 transition">' +
                 '<i class="fa-solid fa-copy"></i> 复制专属链接' +
               '</button>' +
               (pendingProfit > 0 ? 
@@ -6064,9 +6081,21 @@ function getAdminHTML(env) {
       container.innerHTML = html;
     }
 
+    function copyAffiliateLink(url) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(function() {
+          alert("已复制合伙人专属链接！");
+        }).catch(function() {
+          prompt("请手动复制合伙人专属链接:", url);
+        });
+      } else {
+        prompt("请手动复制合伙人专属链接:", url);
+      }
+    }
+
     async function settleAffiliateProfit(code, pendingAmount) {
       var key = document.getElementById("admin-key").value.trim();
-      var amtStr = prompt("请输入为合伙人【" + code + "】结算的提成金额 (元)：\n当前待结算利润为: ￥" + pendingAmount, pendingAmount);
+      var amtStr = prompt("请输入为合伙人【" + code + "】结算的提成金额 (元)：\\n当前待结算利润为: ￥" + pendingAmount, pendingAmount);
       if (amtStr === null) return;
       var amt = parseFloat(amtStr);
       if (isNaN(amt) || amt <= 0) return alert("请输入有效结算金额");
@@ -6093,7 +6122,7 @@ function getAdminHTML(env) {
       var keyInput = document.getElementById("admin-key");
       var key = (keyInput ? keyInput.value.trim() : "") || localStorage.getItem("faka_admin_key") || sessionStorage.getItem("faka_admin_key");
       if (!key) {
-        document.getElementById("admin-login-modal").classList.remove("hidden");
+        showAdminLoginModal();
         return;
       }
       if (keyInput) keyInput.value = key;
@@ -6257,7 +6286,7 @@ function getAdminHTML(env) {
           }
         } else {
           if (adminPollTimer) clearInterval(adminPollTimer);
-          document.getElementById("admin-login-modal").classList.remove("hidden");
+          showAdminLoginModal();
           var errMsg = document.getElementById("gate-error-msg");
           if (errMsg) {
             errMsg.innerText = "⚠️ 访问拒绝: " + (json.msg || "管理密钥错误");
@@ -7293,7 +7322,7 @@ function getAdminHTML(env) {
           var json = await res.json();
           if (json.code === 0) {
             localStorage.setItem("faka_admin_key", targetKey);
-            document.getElementById("admin-login-modal").classList.add("hidden");
+            hideAdminLoginModal();
             try {
               await loadAdminData();
             } catch(err) {
@@ -7306,7 +7335,7 @@ function getAdminHTML(env) {
       }
 
       // 未登录或密码不正确，展示安全锁屏门禁并聚焦密码框
-      document.getElementById("admin-login-modal").classList.remove("hidden");
+      showAdminLoginModal();
       var gateInp = document.getElementById("gate-password-input");
       if (gateInp && !gateInp.value) {
         gateInp.value = "51245124";
