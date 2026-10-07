@@ -4,10 +4,22 @@
  */
 
 export default {
-  // 1. 定时任务：自动抓取目标网站账号入库
+  // 1. 定时任务：自动抓取目标网站账号入库 + 自动清理超期废单维护
   async scheduled(event, env, ctx) {
-    console.log("⏰ 触发定时抓取任务...");
-    await syncAccountsFromSource(env);
+    console.log("⏰ 触发定时抓取与维护任务...");
+    try {
+      await syncAccountsFromSource(env, true);
+    } catch(e) {
+      console.error("定时抓取异常:", e);
+    }
+
+    try {
+      // 自动清理超过 48 小时的未付款无效订单，保持数据库轻巧敏捷
+      await env.DB.prepare(`
+        DELETE FROM orders 
+        WHERE status = 0 AND created_at < datetime('now', '+8 hours', '-48 hours')
+      `).run();
+    } catch(e) {}
   },
 
   // 2. HTTP 请求处理
@@ -1463,6 +1475,18 @@ async function ensureDbMigrated(env) {
       )
     `).run();
   } catch (e) {}
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no)").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_carmis_reg_status ON carmis(region, status)").run();
+  } catch (e) {}
+  try {
+    await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_carmis_account ON carmis(account)").run();
+  } catch (e) {}
 }
 
 function cleanCategoryName(name) {
@@ -1533,6 +1557,51 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin, customConf
   const password = parsed.password || "--";
   const siteUrl = origin || "https://faka.medpic.eu.cc";
 
+  const isApple = ["美国", "香港", "日本", "台湾", "通用", "韩国", "新加坡", "英国"].includes(order.region);
+  const productName = isApple ? `${order.region || '独享'} Apple ID (下载小火箭/独享账号)` : (order.region || '商品卡密');
+
+  let carmiCardHtml = '';
+  if (parsed.password) {
+    carmiCardHtml = `
+      <div style="background:#0f172a;border:1px solid #3b82f6;border-radius:12px;padding:14px 16px;margin-bottom:12px;">
+        <div style="font-size:11px;color:#93c5fd;font-weight:bold;margin-bottom:4px;">${isApple ? 'Apple ID 账号 (邮箱)' : '登录账号'}</div>
+        <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#ffffff;word-break:break-all;user-select:all;">${account}</div>
+      </div>
+      <div style="background:#0f172a;border:1px solid #10b981;border-radius:12px;padding:14px 16px;">
+        <div style="font-size:11px;color:#6ee7b7;font-weight:bold;margin-bottom:4px;">登录密码</div>
+        <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#34d399;word-break:break-all;user-select:all;">${password}</div>
+      </div>
+    `;
+  } else {
+    carmiCardHtml = `
+      <div style="background:#0f172a;border:1px solid #3b82f6;border-radius:12px;padding:14px 16px;">
+        <div style="font-size:11px;color:#93c5fd;font-weight:bold;margin-bottom:4px;">商品卡密 / 兑换凭证</div>
+        <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#34d399;word-break:break-all;user-select:all;">${carmiText}</div>
+      </div>
+    `;
+  }
+
+  let guideHtml = '';
+  if (isApple) {
+    guideHtml = `
+      <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:14px;padding:16px;margin-bottom:22px;font-size:12px;color:#fde68a;line-height:1.7;">
+        <b style="color:#fbbf24;font-size:13px;display:block;margin-bottom:6px;">⚠️ 新手上路 3 步指南（必读）：</b>
+        1. 打开手机 <b>App Store</b>（应用商店），点击右上角头像滑到最底部退出当前账号，粘贴上方账号和密码登录。<br>
+        2. <b>严禁在手机系统【设置/iCloud】中登录共享账号！</b>切勿开启 iCloud 同步。<br>
+        3. 若弹出“双重认证 / Apple ID 安全”，请选择<b>【其他选项】➔【不升级】</b>即可直接搜索下载小火箭！<br>
+        4. 本订单享受 <b>2小时售后质保</b>，如遇密码错误等异常，可随时前往官网自助换号。
+      </div>
+    `;
+  } else {
+    guideHtml = `
+      <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:14px;padding:16px;margin-bottom:22px;font-size:12px;color:#93c5fd;line-height:1.7;">
+        <b style="color:#60a5fa;font-size:13px;display:block;margin-bottom:6px;">📌 使用说明与售后保障：</b>
+        1. 请妥善保管上方卡密凭证，根据该商品对应说明在官方应用或网站中兑换使用。<br>
+        2. 如遇任何使用疑问或售后问题，可随时点击下方按钮前往官网联系客服或查询订单详情。
+      </div>
+    `;
+  }
+
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -1546,14 +1615,14 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin, customConf
         <div style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:28px 24px;text-align:center;color:#ffffff;">
           <div style="font-size:26px;margin-bottom:6px;">🚀</div>
           <h1 style="margin:0;font-size:22px;font-weight:bold;letter-spacing:-0.5px;">${siteName} · 卡密交付凭证</h1>
-          <p style="margin:8px 0 0 0;font-size:13px;opacity:0.9;">感谢您的信任与支持，您的专属账号卡密已交付！</p>
+          <p style="margin:8px 0 0 0;font-size:13px;opacity:0.9;">感谢您的信任与支持，您的专属卡密已交付！</p>
         </div>
         <div style="padding:24px 20px;">
           <!-- 订单基本信息卡片 -->
           <div style="background:#0f172a;border-radius:14px;padding:16px 18px;border:1px solid #334155;margin-bottom:20px;">
             <table style="width:100%;font-size:13px;line-height:1.9;color:#94a3b8;">
               <tr><td style="width:85px;color:#64748b;"><b>订单编号：</b></td><td style="font-family:monospace;color:#a5b4fc;font-weight:bold;">${order.order_no}</td></tr>
-              <tr><td style="color:#64748b;"><b>商品名称：</b></td><td style="color:#f8fafc;font-weight:bold;">${order.region || '独享'} Apple ID (免费下载小火箭)</td></tr>
+              <tr><td style="color:#64748b;"><b>商品名称：</b></td><td style="color:#f8fafc;font-weight:bold;">${productName}</td></tr>
               <tr><td style="color:#64748b;"><b>支付金额：</b></td><td style="color:#34d399;font-weight:bold;font-size:15px;">￥${order.price || '4.99'}</td></tr>
               <tr><td style="color:#64748b;"><b>发货时间：</b></td><td>${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</td></tr>
             </table>
@@ -1562,28 +1631,13 @@ async function sendCarmiEmail(env, order, carmiText, toEmail, origin, customConf
           <!-- 卡密主体卡片 -->
           <div style="margin-bottom:22px;">
             <div style="font-size:14px;font-weight:bold;color:#f8fafc;margin-bottom:12px;display:flex;align-items:center;">
-              🔑 您的专属账号卡密详情：
+              🔑 您的专属卡密信息：
             </div>
-            
-            <div style="background:#0f172a;border:1px solid #3b82f6;border-radius:12px;padding:14px 16px;margin-bottom:12px;">
-              <div style="font-size:11px;color:#93c5fd;font-weight:bold;margin-bottom:4px;">Apple ID 账号 (邮箱)</div>
-              <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#ffffff;word-break:break-all;user-select:all;">${account}</div>
-            </div>
-
-            <div style="background:#0f172a;border:1px solid #10b981;border-radius:12px;padding:14px 16px;">
-              <div style="font-size:11px;color:#6ee7b7;font-weight:bold;margin-bottom:4px;">登录密码</div>
-              <div style="font-size:15px;font-family:monospace;font-weight:bold;color:#34d399;word-break:break-all;user-select:all;">${password}</div>
-            </div>
+            ${carmiCardHtml}
           </div>
 
-          <!-- 3步新手使用必读指引 -->
-          <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:14px;padding:16px;margin-bottom:22px;font-size:12px;color:#fde68a;line-height:1.7;">
-            <b style="color:#fbbf24;font-size:13px;display:block;margin-bottom:6px;">⚠️ 新手上路 3 步指南（必读）：</b>
-            1. 打开手机 <b>App Store</b>（应用商店），点击右上角头像滑到最底部退出当前账号，粘贴上方账号和密码登录。<br>
-            2. <b>严禁在手机系统【设置/iCloud】中登录共享账号！</b>切勿开启 iCloud 同步。<br>
-            3. 若弹出“双重认证 / Apple ID 安全”，请选择<b>【其他选项】➔【不升级】</b>即可直接搜索下载小火箭！<br>
-            4. 本订单享受 <b>2小时售后质保</b>，如遇密码错误等异常，可随时前往官网自助换号。
-          </div>
+          <!-- 使用说明与指引 -->
+          ${guideHtml}
 
           <!-- 官网查单售后按钮 -->
           <div style="text-align:center;padding-top:6px;">
@@ -1881,16 +1935,24 @@ async function fetchLatestLiveAccount(env, region, excludeCarmi = "") {
   return null;
 }
 
+let _lastSourceSyncTime = 0;
+let _cachedSourceSyncRes = null;
+
 /**
  * 核心抓取与解析逻辑 (适配 haoged.top/share/app，智能识别美区/港区/日区/台区、状态与最新检查时间)
  */
-async function syncAccountsFromSource(env) {
+async function syncAccountsFromSource(env, force = false) {
+  if (!force && _cachedSourceSyncRes && (Date.now() - _lastSourceSyncTime < 20000)) {
+    return _cachedSourceSyncRes;
+  }
+
   const targetUrl = env.TARGET_URL || "https://haoged.top/share/app";
   let inserted = 0;
   let total = 0;
 
   try {
     const res = await fetch(targetUrl, {
+      signal: AbortSignal.timeout(8000),
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -1984,7 +2046,9 @@ async function syncAccountsFromSource(env) {
       } catch (dbErr) {}
     }
 
-    return { total, inserted, accounts };
+    _lastSourceSyncTime = Date.now();
+    _cachedSourceSyncRes = { total, inserted, accounts };
+    return _cachedSourceSyncRes;
   } catch (err) {
     return { total: 0, inserted: 0, accounts: [], error: err.message };
   }
@@ -2631,7 +2695,7 @@ function getFrontendHTML(env) {
 
         <div class="bg-slate-900/90 rounded-xl p-4 border border-slate-800 space-y-3">
           <div class="flex justify-between items-center mb-1">
-            <span class="text-xs text-slate-400 font-medium">Apple ID 账号信息详情：</span>
+            <span id="res-header-label" class="text-xs text-slate-400 font-medium">Apple ID 账号信息详情：</span>
             <span id="warranty-badge" class="text-xs text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex items-center gap-1">
               <i class="fa-solid fa-shield-halved"></i> 2小时质保中
             </span>
@@ -2640,16 +2704,16 @@ function getFrontendHTML(env) {
           <!-- 独立账号卡片 -->
           <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
             <div class="min-w-0 flex-1">
-              <div class="text-[11px] text-slate-400 mb-0.5">Apple ID 账号 (邮箱)</div>
+              <div id="res-account-label" class="text-[11px] text-slate-400 mb-0.5">Apple ID 账号 (邮箱)</div>
               <div id="res-account" class="text-sm font-mono text-white font-semibold truncate select-all">--</div>
             </div>
-            <button onclick="copySingleField('res-account', '账号已复制')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 shadow">
-              <i class="fa-solid fa-copy"></i> 复制账号
+            <button onclick="copySingleField('res-account', '内容已复制')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1 shrink-0 shadow">
+              <i class="fa-solid fa-copy"></i> <span id="btn-copy-acc-text">复制账号</span>
             </button>
           </div>
 
           <!-- 独立密码卡片 -->
-          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
+          <div id="res-password-card" class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
             <div class="min-w-0 flex-1">
               <div class="text-[11px] text-slate-400 mb-0.5">登录密码</div>
               <div id="res-password" class="text-sm font-mono text-emerald-400 font-semibold truncate select-all">--</div>
@@ -2685,7 +2749,7 @@ function getFrontendHTML(env) {
         </div>
 
         <!-- 新手 3 步使用图文指引 -->
-        <div class="p-3 rounded-xl bg-slate-950/80 border border-indigo-500/30 text-xs space-y-2">
+        <div id="res-guide-box" class="p-3 rounded-xl bg-slate-950/80 border border-indigo-500/30 text-xs space-y-2">
           <div class="font-bold text-indigo-300 flex items-center gap-1.5">
             <i class="fa-solid fa-book-open-reader"></i> 3步新手使用指南（极速上手）：
           </div>
@@ -2707,7 +2771,7 @@ function getFrontendHTML(env) {
 
         <div class="flex gap-3">
           <button onclick="copyAllCarmi()" class="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-xl transition flex items-center justify-center gap-2 text-xs">
-            <i class="fa-solid fa-clone"></i> 复制完整账号+密码
+            <i class="fa-solid fa-clone"></i> <span id="btn-copy-all-text">复制完整账号+密码</span>
           </button>
           <button onclick="closeModal()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition text-xs">
             完成
@@ -2880,9 +2944,35 @@ function getFrontendHTML(env) {
       var accEl = document.getElementById("res-account");
       var pwdEl = document.getElementById("res-password");
       var rawEl = document.getElementById("res-carmi");
-      if (accEl) accEl.innerText = parsed.account || carmiStr || "--";
-      if (pwdEl) pwdEl.innerText = parsed.password || "--";
+      var headerEl = document.getElementById("res-header-label");
+      var accLabelEl = document.getElementById("res-account-label");
+      var pwdCard = document.getElementById("res-password-card");
+      var guideBox = document.getElementById("res-guide-box");
+      var copyAccBtnText = document.getElementById("btn-copy-acc-text");
+      var copyAllBtnText = document.getElementById("btn-copy-all-text");
+
       if (rawEl) rawEl.innerText = carmiStr || "";
+
+      if (parsed.password) {
+        if (accEl) accEl.innerText = parsed.account || "--";
+        if (pwdEl) pwdEl.innerText = parsed.password || "--";
+        if (headerEl) headerEl.innerText = "账号与登录密码详情：";
+        if (accLabelEl) accLabelEl.innerText = "Apple ID 账号 (邮箱)";
+        if (pwdCard) pwdCard.style.display = "flex";
+        if (copyAccBtnText) copyAccBtnText.innerText = "复制账号";
+        if (copyAllBtnText) copyAllBtnText.innerText = "复制完整账号+密码";
+
+        var isApple = ["美国", "香港", "日本", "台湾", "通用", "韩国", "新加坡", "英国"].includes(currentSelectedRegion);
+        if (guideBox) guideBox.style.display = isApple ? "block" : "none";
+      } else {
+        if (accEl) accEl.innerText = parsed.account || carmiStr || "--";
+        if (headerEl) headerEl.innerText = "商品卡密 / 兑换凭证详情：";
+        if (accLabelEl) accLabelEl.innerText = "卡密 / 兑换码内容";
+        if (pwdCard) pwdCard.style.display = "none";
+        if (guideBox) guideBox.style.display = "none";
+        if (copyAccBtnText) copyAccBtnText.innerText = "复制卡密";
+        if (copyAllBtnText) copyAllBtnText.innerText = "复制卡密全文";
+      }
     }
 
     function showToast(msg) {
