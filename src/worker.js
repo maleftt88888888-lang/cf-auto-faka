@@ -38,31 +38,22 @@ export default {
         `).all();
 
         const defaultRegions = ["美国", "香港", "日本", "台湾", "通用"];
-        const regionMap = {};
-        for (const r of defaultRegions) {
-          regionMap[r] = { region: r, stock: 0, sold: 0 };
-        }
-
-        if (rows.results) {
-          for (const row of rows.results) {
-            regionMap[row.region] = {
-              region: row.region,
-              stock: row.stock || 0,
-              sold: row.sold || 0,
-            };
-          }
-        }
-
+        let customCategories = [];
+        let categoryPrices = {};
+        let categoryImages = {};
         let qrcode = env.PAY_QRCODE_URL || "";
         let currentPrice = env.PRICE_PER_ACCOUNT || "4.99";
         let currentSiteName = env.SITE_NAME || "小火箭账号";
-        let categoryPrices = {};
-        let categoryImages = {};
         let siteAnnouncement = "";
         let payNote = "";
         let contactInfo = { wechat: "", wechat_qr: "", telegram: "", qq: "", custom_tip: "" };
 
         try {
+          const customCatRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CUSTOM_CATEGORIES'").first();
+          if (customCatRow && customCatRow.value) {
+            try { customCategories = JSON.parse(customCatRow.value); } catch(e) {}
+          }
+
           const qrRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'PAY_QRCODE'").first();
           if (qrRow && qrRow.value) qrcode = qrRow.value;
 
@@ -93,6 +84,31 @@ export default {
             try { categoryImages = JSON.parse(catImgRow.value); } catch(e) {}
           }
         } catch (e) {}
+
+        const allKnownCategories = Array.from(new Set([
+          ...defaultRegions,
+          ...customCategories,
+          ...Object.keys(categoryPrices),
+          ...Object.keys(categoryImages),
+          ...(rows.results ? rows.results.map(r => r.region) : [])
+        ])).filter(Boolean);
+
+        const regionMap = {};
+        for (const r of allKnownCategories) {
+          regionMap[r] = { region: r, stock: 12, sold: 0 };
+        }
+
+        if (rows.results) {
+          for (const row of rows.results) {
+            if (row.region) {
+              regionMap[row.region] = {
+                region: row.region,
+                stock: row.stock !== undefined ? row.stock : 12,
+                sold: row.sold || 0,
+              };
+            }
+          }
+        }
 
         let totalSoldDb = 0;
         try {
@@ -512,13 +528,25 @@ export default {
           if (couponRes && couponRes.results) couponList = couponRes.results;
         } catch(e) {}
 
+        let customCategories = [];
+        try {
+          const customCatRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CUSTOM_CATEGORIES'").first();
+          if (customCatRow && customCatRow.value) {
+            try { customCategories = JSON.parse(customCatRow.value); } catch(e) {}
+          }
+        } catch(e) {}
+
         let allCategories = ["美国", "香港", "日本", "台湾", "通用"];
         try {
           const catRows = await env.DB.prepare("SELECT DISTINCT region FROM carmis WHERE region IS NOT NULL").all();
-          if (catRows && catRows.results) {
-            const extraCats = catRows.results.map(r => r.region).filter(Boolean);
-            allCategories = Array.from(new Set([...allCategories, ...extraCats, ...Object.keys(categoryPrices), ...Object.keys(categoryImages)]));
-          }
+          const extraCats = (catRows && catRows.results) ? catRows.results.map(r => r.region).filter(Boolean) : [];
+          allCategories = Array.from(new Set([
+            ...allCategories, 
+            ...customCategories, 
+            ...extraCats, 
+            ...Object.keys(categoryPrices), 
+            ...Object.keys(categoryImages)
+          ])).filter(Boolean);
         } catch(e) {}
 
         let emailConfig = { provider: "resend", resend_key: "", from_email: "onboarding@resend.dev" };
@@ -591,6 +619,119 @@ export default {
         return jsonResponse({
           code: 0,
           msg: "🎉 品类定价已保存生效！"
+        }, corsHeaders);
+      }
+
+      // 路由 6.25: 管理员后台 - 新增自定义品类 (持久化到数据库并同步前台)
+      if (path === "/api/admin/add_category" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const name = (body.name || body.region || "").trim();
+        if (!name) {
+          return jsonResponse({ code: -1, msg: "品类名称不能为空" }, corsHeaders);
+        }
+
+        let customCategories = [];
+        try {
+          const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CUSTOM_CATEGORIES'").first();
+          if (row && row.value) customCategories = JSON.parse(row.value);
+        } catch(e) {}
+
+        if (!customCategories.includes(name)) {
+          customCategories.push(name);
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('CUSTOM_CATEGORIES', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(JSON.stringify(customCategories)).run();
+        }
+
+        if (body.price && parseFloat(body.price) > 0) {
+          let categoryPrices = {};
+          try {
+            const pRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
+            if (pRow && pRow.value) categoryPrices = JSON.parse(pRow.value);
+          } catch(e) {}
+          categoryPrices[name] = parseFloat(body.price).toFixed(2);
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('CATEGORY_PRICES', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(JSON.stringify(categoryPrices)).run();
+        }
+
+        if (body.image_url) {
+          let categoryImages = {};
+          try {
+            const iRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
+            if (iRow && iRow.value) categoryImages = JSON.parse(iRow.value);
+          } catch(e) {}
+          categoryImages[name] = body.image_url.trim();
+          await env.DB.prepare(`
+            INSERT INTO settings (key, value, updated_at)
+            VALUES ('CATEGORY_IMAGES', ?, datetime('now', '+8 hours'))
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+          `).bind(JSON.stringify(categoryImages)).run();
+        }
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 新品类【${name}】已成功添加并同步至前台商城！`
+        }, corsHeaders);
+      }
+
+      // 路由 6.26: 管理员后台 - 删除品类 (从数据库完全移除)
+      if (path === "/api/admin/delete_category" && request.method === "POST") {
+        const body = await request.json();
+        const key = body.key || "";
+        if (!await verifyAdminKey(env, key)) {
+          return jsonResponse({ code: 403, msg: "管理员密钥错误" }, corsHeaders, 403);
+        }
+
+        const name = (body.name || body.region || "").trim();
+        if (!name) {
+          return jsonResponse({ code: -1, msg: "品类名称不能为空" }, corsHeaders);
+        }
+
+        let customCategories = [];
+        try {
+          const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CUSTOM_CATEGORIES'").first();
+          if (row && row.value) customCategories = JSON.parse(row.value);
+        } catch(e) {}
+
+        customCategories = customCategories.filter(c => c !== name);
+        await env.DB.prepare(`
+          INSERT INTO settings (key, value, updated_at)
+          VALUES ('CUSTOM_CATEGORIES', ?, datetime('now', '+8 hours'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now', '+8 hours')
+        `).bind(JSON.stringify(customCategories)).run();
+
+        // 同时从独立定价和封面图中移除
+        try {
+          const pRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_PRICES'").first();
+          if (pRow && pRow.value) {
+            const categoryPrices = JSON.parse(pRow.value);
+            delete categoryPrices[name];
+            await env.DB.prepare("UPDATE settings SET value = ?, updated_at = datetime('now', '+8 hours') WHERE key = 'CATEGORY_PRICES'").bind(JSON.stringify(categoryPrices)).run();
+          }
+        } catch(e) {}
+
+        try {
+          const iRow = await env.DB.prepare("SELECT value FROM settings WHERE key = 'CATEGORY_IMAGES'").first();
+          if (iRow && iRow.value) {
+            const categoryImages = JSON.parse(iRow.value);
+            delete categoryImages[name];
+            await env.DB.prepare("UPDATE settings SET value = ?, updated_at = datetime('now', '+8 hours') WHERE key = 'CATEGORY_IMAGES'").bind(JSON.stringify(categoryImages)).run();
+          }
+        } catch(e) {}
+
+        return jsonResponse({
+          code: 0,
+          msg: `🎉 已成功删除品类【${name}】！前台商城已同步移除。`
         }, corsHeaders);
       }
 
@@ -4402,14 +4543,16 @@ function getAdminHTML(env) {
           '<div class="w-12 h-12 rounded-xl bg-slate-950 text-slate-500 flex flex-col items-center justify-center text-[10px] shrink-0 border border-dashed border-slate-700"><i class="fa-solid fa-image text-xs mb-0.5"></i>无封面</div>';
 
         var clearBtn = imgUrl ? 
-          '<button data-cat="' + encodedCat + '" onclick="clearCategoryImage(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded text-[11px] shrink-0 border border-rose-800/60 transition" title="清除图片"><i class="fa-solid fa-trash-can"></i></button>' : '';
+          '<button data-cat="' + encodedCat + '" onclick="clearCategoryImage(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-amber-950/60 hover:bg-amber-900 text-amber-300 rounded text-[11px] shrink-0 border border-amber-800/60 transition" title="清除图片"><i class="fa-solid fa-eraser"></i></button>' : '';
+
+        var deleteCatBtn = '<button data-cat="' + encodedCat + '" onclick="deleteCategory(decodeURIComponent(this.dataset.cat))" class="px-2 py-1 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded text-[11px] shrink-0 border border-rose-800/60 transition" title="删除该品类规格"><i class="fa-solid fa-trash-can"></i></button>';
 
         return '<div class="p-3 bg-slate-800/80 rounded-xl border border-slate-700/70 space-y-2.5">' +
           '<div class="flex items-center gap-3">' +
             imgPreview +
             '<div class="flex-1 min-w-0 space-y-1.5">' +
               '<div class="flex items-center justify-between">' +
-                '<span class="text-xs font-bold text-white truncate">' + cat + '</span>' +
+                '<span class="text-xs font-bold text-white truncate flex items-center gap-1.5"><i class="fa-solid fa-tag text-indigo-400 text-[10px]"></i>' + cat + '</span>' +
                 '<div class="flex items-center gap-1.5">' +
                   '<button data-cat="' + encodedCat + '" onclick="aiGenerateCategoryImage(decodeURIComponent(this.dataset.cat), this)" class="px-2.5 py-1 bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700 text-white font-bold rounded text-[11px] flex items-center gap-1 shadow transition" title="使用 AI 一键为该品类生成专属高清封面">' +
                     '<i class="fa-solid fa-wand-magic-sparkles"></i> AI生图' +
@@ -4422,6 +4565,7 @@ function getAdminHTML(env) {
                     '<i class="fa-solid fa-link"></i> URL' +
                   '</button>' +
                   clearBtn +
+                  deleteCatBtn +
                 '</div>' +
               '</div>' +
               '<div class="flex items-center gap-2">' +
@@ -4437,6 +4581,80 @@ function getAdminHTML(env) {
       }).join("");
 
       container.innerHTML = html;
+      updateImportRegionSelect(currentCategories);
+    }
+
+    function updateImportRegionSelect(categories) {
+      var select = document.getElementById("import-region-select");
+      if (!select) return;
+      var curVal = select.value;
+      var cats = (categories && Array.isArray(categories)) ? categories : currentCategories;
+      
+      var html = cats.map(function(c) {
+        return '<option value="' + c + '">' + c + '</option>';
+      }).join("");
+      html += '<option value="__custom__">+ 自定义品类名称</option>';
+      select.innerHTML = html;
+      if (cats.indexOf(curVal) !== -1) {
+        select.value = curVal;
+      }
+    }
+
+    function onRegionSelectChange(val) {
+      var customInp = document.getElementById("import-region-custom");
+      if (!customInp) return;
+      if (val === "__custom__") {
+        customInp.classList.remove("hidden");
+        customInp.focus();
+      } else {
+        customInp.classList.add("hidden");
+      }
+    }
+
+    async function addCustomCategoryPriceRow() {
+      var catName = prompt("请输入新品类名称（例如：ChatGPT、Netflix、英国独享ID、新加坡 等）：");
+      if (!catName || !catName.trim()) return;
+      catName = catName.trim();
+      var key = document.getElementById("admin-key").value.trim();
+
+      try {
+        var res = await fetch("/api/admin/add_category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, name: catName })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || ("🎉 新品类【" + catName + "】已成功添加！前台商城已同步显示！"));
+          loadAdminData();
+        } else {
+          alert(json.msg || "添加失败");
+        }
+      } catch(e) {
+        alert("网络连接异常，添加失败");
+      }
+    }
+
+    async function deleteCategory(region) {
+      var key = document.getElementById("admin-key").value.trim();
+      if (!confirm("确定要删除品类【" + region + "】吗？\n删除后前台商城将不再展示该商品规格。")) return;
+
+      try {
+        var res = await fetch("/api/admin/delete_category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: key, name: region })
+        });
+        var json = await res.json();
+        if (json.code === 0) {
+          alert(json.msg || ("🎉 已成功删除品类【" + region + "】！"));
+          loadAdminData();
+        } else {
+          alert(json.msg || "删除失败");
+        }
+      } catch(e) {
+        alert("删除请求失败");
+      }
     }
 
     // ✨ AI 智能自动生成商品封面配图
@@ -4530,16 +4748,6 @@ function getAdminHTML(env) {
       } catch(e) {
         alert("生成失败，请重试");
       }
-    }
-
-    function addCustomCategoryPriceRow() {
-      var catName = prompt("请输入新品类名称（例如：ChatGPT、Netflix、土耳其ID 等）：");
-      if (!catName || !catName.trim()) return;
-      catName = catName.trim();
-      if (currentCategories.indexOf(catName) === -1) {
-        currentCategories.push(catName);
-      }
-      renderCategoryPriceTable(currentCategories, currentCategoryPrices, currentCategoryImages);
     }
 
     async function handleCategoryFileUpload(region, inputEl) {
