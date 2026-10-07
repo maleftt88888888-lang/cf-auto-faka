@@ -4247,6 +4247,7 @@ function getAdminHTML(env) {
 
     function onRegionSelectChange(val) {
       var customInput = document.getElementById("import-region-custom");
+      if (!customInput) return;
       if (val === "__custom__") {
         customInput.classList.remove("hidden");
         customInput.focus();
@@ -4600,17 +4601,6 @@ function getAdminHTML(env) {
       }
     }
 
-    function onRegionSelectChange(val) {
-      var customInp = document.getElementById("import-region-custom");
-      if (!customInp) return;
-      if (val === "__custom__") {
-        customInp.classList.remove("hidden");
-        customInp.focus();
-      } else {
-        customInp.classList.add("hidden");
-      }
-    }
-
     async function addCustomCategoryPriceRow() {
       var catName = prompt("请输入新品类名称（例如：ChatGPT、Netflix、英国独享ID、新加坡 等）：");
       if (!catName || !catName.trim()) return;
@@ -4637,7 +4627,7 @@ function getAdminHTML(env) {
 
     async function deleteCategory(region) {
       var key = document.getElementById("admin-key").value.trim();
-      if (!confirm("确定要删除品类【" + region + "】吗？\n删除后前台商城将不再展示该商品规格。")) return;
+      if (!confirm("确定要删除品类【" + region + "】吗？\\n删除后前台商城将不再展示该商品规格。")) return;
 
       try {
         var res = await fetch("/api/admin/delete_category", {
